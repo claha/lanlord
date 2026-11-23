@@ -1,0 +1,9 @@
+[package]
+name = "lanlord"
+version = "0.1.0"
+edition = "2024"
+description = "Self-hosted LAN device inventory for homelabs"
+license = "MIT"
+repository = "https://github.com/claha/lanlord"
+
+[dependencies]

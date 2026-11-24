@@ -44,7 +44,7 @@ async fn body_of(resp: http::Response<Body>) -> String {
 
 fn app_with_one_device() -> axum::Router {
     let db = Arc::new(Db::open(":memory:").expect("in-memory database opens and runs migrations"));
-    db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", 1_700_000_000)
+    db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", None, 1_700_000_000)
         .expect("seed device upserts");
     let state = AppState {
         db,

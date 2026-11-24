@@ -32,7 +32,7 @@ pub async fn run_scan(
         .filter(|obs| !own.matches(obs))
         .collect::<Vec<_>>();
     for obs in &observations {
-        db.upsert_device(&obs.mac, &obs.ip.to_string(), now)
+        db.upsert_device(&obs.mac, &obs.ip.to_string(), obs.hostname.as_deref(), now)
             .map_err(ScanError::Inventory)?;
     }
     Ok(observations)
@@ -132,6 +132,15 @@ mod tests {
         Observation {
             mac: mac.to_string(),
             ip: ip.parse().unwrap(),
+            hostname: None,
+        }
+    }
+
+    fn observation_with_hostname(mac: &str, ip: &str, hostname: &str) -> Observation {
+        Observation {
+            mac: mac.to_string(),
+            ip: ip.parse().unwrap(),
+            hostname: Some(hostname.to_string()),
         }
     }
 
@@ -176,8 +185,94 @@ mod tests {
                 device.first_seen, device.last_seen,
                 "first and last seen agree on insert"
             );
-            assert_eq!(device.hostname, None, "hostname is empty until ticket #5");
+            assert_eq!(
+                device.hostname, None,
+                "no hostname in the observation means none stored"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn first_scan_stores_hostname_from_observation() {
+        let db = open_temp_db("lanlord.test.scan.hostname-first.sqlite");
+        let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![vec![
+            observation_with_hostname("aa:bb:cc:dd:ee:01", "10.0.0.1", "gateway.home.arpa"),
+            observation("aa:bb:cc:dd:ee:02", "10.0.0.2"),
+        ]]));
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("first scan succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 2);
+        let gateway = devices
+            .iter()
+            .find(|d| d.mac == "aa:bb:cc:dd:ee:01")
+            .unwrap();
+        assert_eq!(
+            gateway.hostname.as_deref(),
+            Some("gateway.home.arpa"),
+            "resolved hostname is stored"
+        );
+        let other = devices
+            .iter()
+            .find(|d| d.mac == "aa:bb:cc:dd:ee:02")
+            .unwrap();
+        assert_eq!(other.hostname, None, "missing hostname stays unknown");
+    }
+
+    #[tokio::test]
+    async fn repeat_scan_updates_hostname_when_it_changes() {
+        let db = open_temp_db("lanlord.test.scan.hostname-change.sqlite");
+        let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![
+            vec![observation_with_hostname(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+                "old.home.arpa",
+            )],
+            vec![observation_with_hostname(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+                "new.home.arpa",
+            )],
+        ]));
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("first scan succeeds");
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("repeat scan succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            devices[0].hostname.as_deref(),
+            Some("new.home.arpa"),
+            "changed hostname is refreshed"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_without_hostname_stores_nothing_without_failing() {
+        // A failed reverse lookup yields no hostname: the scan still succeeds
+        // and the device row is written without disturbing its other fields.
+        let db = open_temp_db("lanlord.test.scan.hostname-none.sqlite");
+        let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![
+            vec![observation_with_hostname(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+                "old.home.arpa",
+            )],
+            vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
+        ]));
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("first scan succeeds");
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("scan without hostname still succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].hostname, None, "failed lookup stores nothing");
+        assert_eq!(devices[0].ip, "10.0.0.2", "most recent IP still wins");
     }
 
     #[tokio::test]

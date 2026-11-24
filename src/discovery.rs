@@ -5,13 +5,15 @@ use std::io::ErrorKind;
 use std::net::Ipv4Addr;
 use std::os::raw::c_int;
 use std::pin::Pin;
+use std::time::Duration;
 
-/// One observation from a Scan: a MAC address and the IPv4 address it had at
-/// that moment.
+/// One observation from a Scan: a MAC address, the IPv4 address it had at
+/// that moment, and an optional reverse-DNS hostname for that address.
 #[derive(Clone, Debug)]
 pub struct Observation {
     pub mac: String,
     pub ip: Ipv4Addr,
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +39,11 @@ const ARPOP_REPLY: u16 = 2;
 
 /// How long the scan keeps listening for ARP replies after sending requests.
 const SCAN_REPLY_WINDOW_SECS: i64 = 2;
+
+/// How long to wait for a single PTR (reverse-DNS) answer before giving up.
+/// A lookup that fails or times out yields no hostname and never fails the
+/// scan: a network without working local DNS degrades to an empty marker.
+const PTR_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The most targets we will send ARP requests to in one Scan. A home Segment
 /// is a /24 (254 hosts); this bounds the worst case of a misconfigured wide
@@ -87,11 +94,34 @@ impl Discovery for ArpDiscovery {
         let own_ip = self.own_ip;
         let own_mac = self.own_mac;
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || sweep(&interface, &segment, own_ip, own_mac))
-                .await
-                .map_err(|error| {
-                    DiscoveryError::Failed(format!("scan task ended unexpectedly: {error}"))
-                })?
+            let observations =
+                tokio::task::spawn_blocking(move || sweep(&interface, &segment, own_ip, own_mac))
+                    .await
+                    .map_err(|error| {
+                        DiscoveryError::Failed(format!("scan task ended unexpectedly: {error}"))
+                    })??;
+            // Reverse-DNS lookup per observed IP after the ARP sweep. Each
+            // lookup runs on the blocking pool with a short timeout; a failure
+            // yields no hostname and never fails the scan.
+            let mut named = Vec::with_capacity(observations.len());
+            let mut handles = Vec::with_capacity(observations.len());
+            for obs in &observations {
+                let ip = obs.ip;
+                handles.push(tokio::task::spawn_blocking(move || ptr_lookup(ip)));
+            }
+            for (obs, handle) in observations.into_iter().zip(handles) {
+                let hostname = tokio::time::timeout(PTR_LOOKUP_TIMEOUT, handle)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .flatten();
+                named.push(Observation {
+                    mac: obs.mac,
+                    ip: obs.ip,
+                    hostname,
+                });
+            }
+            Ok(named)
         })
     }
 }
@@ -368,7 +398,11 @@ fn sweep(
                     .iter()
                     .any(|obs: &Observation| obs.mac == mac_text && obs.ip == ip)
                 {
-                    observations.push(Observation { mac: mac_text, ip });
+                    observations.push(Observation {
+                        mac: mac_text,
+                        ip,
+                        hostname: None,
+                    });
                 }
             }
             Ok(observations)
@@ -383,6 +417,39 @@ fn format_mac(bytes: [u8; 6]) -> String {
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
     )
+}
+
+/// Reverse-DNS (PTR) lookup for `ip`: the hostname the system resolver knows
+/// for that address, or `None` when there is no record or the resolver fails.
+/// `NI_NAMEREQD` makes the resolver report failure instead of falling back to
+/// the numeric address, so "unknown" stays unknown.
+fn ptr_lookup(ip: Ipv4Addr) -> Option<String> {
+    unsafe {
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as u16;
+        // Copy the octets straight into `s_addr` memory: `ip.octets()` is
+        // already in network byte order, so this is endianness neutral.
+        std::ptr::copy_nonoverlapping(
+            ip.octets().as_ptr(),
+            &mut addr.sin_addr.s_addr as *mut u32 as *mut u8,
+            4,
+        );
+        let mut host: [i8; 1024] = [0; 1024];
+        let ret = libc::getnameinfo(
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            host.as_mut_ptr(),
+            host.len() as libc::socklen_t,
+            std::ptr::null_mut(),
+            0,
+            libc::NI_NAMEREQD,
+        );
+        if ret != 0 {
+            return None;
+        }
+        let name = CStr::from_ptr(host.as_ptr()).to_string_lossy();
+        (!name.is_empty()).then_some(name.into_owned())
+    }
 }
 
 fn ip_to_u32(ip: Ipv4Addr) -> u32 {
@@ -437,6 +504,7 @@ mod tests {
         let observation = Observation {
             mac: "aa:bb:cc:dd:ee:ff".to_string(),
             ip: "10.0.0.1".parse().unwrap(),
+            hostname: None,
         };
         let fake = fake::Scripted::new(vec![vec![observation.clone()], vec![]]);
         let first = fake.scan().await.expect("first scan succeeds");

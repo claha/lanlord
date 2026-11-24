@@ -12,6 +12,20 @@ nix develop
 cargo run
 ```
 
+## Checks
+
+CI runs these four commands on every pull request and on every push to `main`,
+inside the flake dev shell so CI and local use the identical toolchain from
+`flake.lock`:
+
+```sh
+nix develop
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+nix build
+```
+
 ## License
 
 MIT

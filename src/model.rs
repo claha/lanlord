@@ -1,7 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A Device is identified by its MAC address; the IP holds the most recent
-/// address observed for that MAC.
+/// address observed for that MAC. `present` is derived at render time from the
+/// most recent Scan start time: true when Last seen is at or after it.
 #[derive(Debug)]
 pub struct Device {
     pub mac: String,
@@ -9,6 +10,7 @@ pub struct Device {
     pub hostname: Option<String>,
     pub first_seen: u64, // UTC epoch seconds
     pub last_seen: u64,  // UTC epoch seconds
+    pub present: bool,   // true when seen in the most recent Scan
 }
 
 /// The Inventory as presented on the web page.

@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use thiserror::Error;
 
 use crate::model;
@@ -71,6 +72,7 @@ impl Db {
                     hostname: row.get(2)?,
                     first_seen: row.get::<_, i64>(3)? as u64,
                     last_seen: row.get::<_, i64>(4)? as u64,
+                    present: false, // derived at render time from the last scan start
                 })
             })
             .map_err(DbError::Query)?;
@@ -104,6 +106,41 @@ impl Db {
         )
         .map_err(DbError::Write)?;
         Ok(())
+    }
+
+    /// Record the start time of the most recent Scan in the `meta` table.
+    pub fn set_last_scan_start(&self, now: u64) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("database connection mutex is not poisoned");
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_scan_start', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [now.to_string()],
+        )
+        .map_err(DbError::Write)?;
+        Ok(())
+    }
+
+    /// Return the start time of the most recent Scan, if any scan has run.
+    pub fn last_scan_start(&self) -> Result<Option<u64>, DbError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("database connection mutex is not poisoned");
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_scan_start'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::Query)?;
+        Ok(value.map(|text| {
+            text.parse::<u64>()
+                .expect("meta value is a valid epoch seconds")
+        }))
     }
 }
 
@@ -226,5 +263,35 @@ mod tests {
         assert_eq!(devices[0].hostname, None, "failed lookup stores nothing");
         assert_eq!(devices[0].ip, "10.0.0.2", "ip is still refreshed");
         assert_eq!(devices[0].last_seen, later, "last seen is still refreshed");
+    }
+
+    #[test]
+    fn last_scan_start_is_none_before_any_scan() {
+        let db = open_test_db("lanlord.test.db.meta-none.sqlite");
+        assert_eq!(
+            db.last_scan_start().expect("read succeeds"),
+            None,
+            "no scan start time is recorded before the first scan"
+        );
+    }
+
+    #[test]
+    fn last_scan_start_is_written_and_read_back() {
+        let db = open_test_db("lanlord.test.db.meta-write.sqlite");
+        db.set_last_scan_start(1_700_000_000)
+            .expect("write succeeds");
+        assert_eq!(
+            db.last_scan_start().expect("read succeeds"),
+            Some(1_700_000_000),
+            "read back matches what was written"
+        );
+
+        db.set_last_scan_start(1_700_000_100)
+            .expect("second write succeeds");
+        assert_eq!(
+            db.last_scan_start().expect("read succeeds"),
+            Some(1_700_000_100),
+            "second write overwrites the first"
+        );
     }
 }

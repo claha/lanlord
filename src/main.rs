@@ -36,12 +36,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         discovery: Arc::new(discovery),
     });
 
-    // Run one startup Scan before serving. A Scan failure is logged with its
-    // cause and the process keeps serving the last known Inventory; genuine
-    // misconfiguration has already failed fast in `config::validate`.
-    if let Err(error) = scan::run_scan(&state.db, &state.discovery, &state.config.interface).await {
-        eprintln!("lanlord: startup scan failed: {error}");
-    }
+    // Run the Scan scheduler alongside the HTTP server: one startup Scan
+    // immediately, then one every scan interval. Scans never overlap — each
+    // Scan completes before the next is scheduled, so a long Scan delays the
+    // next instead of stacking. A Scan failure is logged and the process keeps
+    // serving the last known Inventory.
+    let scheduler_db = state.db.clone();
+    let scheduler_discovery = state.discovery.clone();
+    let scheduler_interface = state.config.interface.clone();
+    let scheduler_interval = state.config.scan_interval;
+    tokio::task::spawn(scan::run_scheduler(
+        scheduler_db,
+        scheduler_discovery,
+        scheduler_interface,
+        scheduler_interval,
+    ));
 
     // `with_state` provides the router its state and turns
     // `Router<Arc<AppState>>` into `Router<()>`, the only router type that is

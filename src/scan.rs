@@ -7,13 +7,14 @@ use std::sync::Arc;
 /// Apply one Scan to the Inventory: collect observations from the `Discovery`
 /// implementation, drop the scanner's own addresses, and upsert each remaining
 /// observation by MAC. First seen is set only on first insert; Last seen and IP
-/// are refreshed on every observation.
+/// are refreshed on every observation. `now` is the scan's start time and is
+/// recorded as the last scan start time for presence derivation.
 pub async fn run_scan(
     db: &Arc<Db>,
     discovery: &Arc<dyn Discovery + Send + Sync>,
     interface: &str,
+    now: u64,
 ) -> Result<Vec<Observation>, ScanError> {
-    let now = now_epoch_seconds();
     let observations = discovery.scan().await.map_err(ScanError::Discovery)?;
 
     let own = match scanner_addresses(interface) {
@@ -35,7 +36,31 @@ pub async fn run_scan(
         db.upsert_device(&obs.mac, &obs.ip.to_string(), obs.hostname.as_deref(), now)
             .map_err(ScanError::Inventory)?;
     }
+    db.set_last_scan_start(now).map_err(ScanError::Inventory)?;
     Ok(observations)
+}
+
+/// Run the Scan scheduler: one startup Scan immediately, then one every
+/// `interval_secs` seconds. Scans never overlap — each Scan completes before
+/// the next one is scheduled, so a long Scan delays the next instead of
+/// stacking. Runs forever; intended to be spawned as a tokio task alongside
+/// the HTTP server.
+pub async fn run_scheduler(
+    db: Arc<Db>,
+    discovery: Arc<dyn Discovery + Send + Sync>,
+    interface: String,
+    interval_secs: u64,
+) {
+    // One startup Scan immediately.
+    let now = now_epoch_seconds();
+    let _ = run_scan(&db, &discovery, &interface, now).await;
+
+    // Then one Scan every interval, never overlapping.
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+        let now = now_epoch_seconds();
+        let _ = run_scan(&db, &discovery, &interface, now).await;
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,6 +153,14 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    use crate::discovery::DiscoveryError;
+
     fn observation(mac: &str, ip: &str) -> Observation {
         Observation {
             mac: mac.to_string(),
@@ -161,6 +194,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_scan_records_last_scan_start_in_meta() {
+        let db = open_temp_db("lanlord.test.scan.meta.sqlite");
+        let discovery: Arc<dyn Discovery + Send + Sync> =
+            Arc::new(Scripted::new(vec![vec![observation(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+            )]]));
+        let now = 1_700_000_000;
+        run_scan(&db, &discovery, "lo", now)
+            .await
+            .expect("scan succeeds");
+        assert_eq!(
+            db.last_scan_start().expect("read succeeds"),
+            Some(now),
+            "scan start time is recorded in meta"
+        );
+    }
+
+    #[tokio::test]
     async fn first_scan_inserts_devices_and_sets_first_and_last_seen() {
         let db = open_temp_db("lanlord.test.scan.first.sqlite");
         let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![vec![
@@ -168,7 +220,7 @@ mod tests {
             observation("aa:bb:cc:dd:ee:02", "10.0.0.2"),
         ]]));
         let before = now_epoch_seconds();
-        let observed = run_scan(&db, &discovery, "lo")
+        let observed = run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let after = now_epoch_seconds();
@@ -199,7 +251,7 @@ mod tests {
             observation_with_hostname("aa:bb:cc:dd:ee:01", "10.0.0.1", "gateway.home.arpa"),
             observation("aa:bb:cc:dd:ee:02", "10.0.0.2"),
         ]]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -235,10 +287,10 @@ mod tests {
                 "new.home.arpa",
             )],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -263,10 +315,10 @@ mod tests {
             )],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("scan without hostname still succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -282,14 +334,14 @@ mod tests {
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
         let first_seen = devices[0].first_seen;
         let last_seen_after_first = devices[0].last_seen;
 
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -316,7 +368,7 @@ mod tests {
             ],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -327,7 +379,7 @@ mod tests {
             .unwrap()
             .last_seen;
 
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("second scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -347,17 +399,17 @@ mod tests {
             vec![],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
         let last_seen_before_absence = devices[0].last_seen;
 
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("absence scan succeeds");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("return scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -377,7 +429,7 @@ mod tests {
             observation("00:00:00:00:00:00", "127.0.0.1"),
             observation("aa:bb:cc:dd:ee:01", "10.0.0.1"),
         ]]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -394,13 +446,15 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
 
         // Exhaust the scripted outcomes so the next scan fails.
         let failing: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![]));
-        let error = run_scan(&db, &failing, "lo").await.unwrap_err();
+        let error = run_scan(&db, &failing, "lo", now_epoch_seconds())
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains("scan failed"),
             "error carries the discovery cause: {error}"
@@ -432,7 +486,9 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo").await.expect("scan A");
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+            .await
+            .expect("scan A");
         // Space the scans a second apart so Last seen differs.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let discovery: Arc<dyn Discovery + Send + Sync> =
@@ -440,7 +496,9 @@ mod tests {
                 "aa:bb:cc:dd:ee:02",
                 "10.0.0.2",
             )]]));
-        run_scan(&db, &discovery, "lo").await.expect("scan B");
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+            .await
+            .expect("scan B");
 
         let state = Arc::new(AppState {
             db,
@@ -462,7 +520,7 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("scan succeeds");
         let state = Arc::new(AppState {
@@ -490,5 +548,166 @@ mod tests {
             body.contains("No devices have been discovered yet"),
             "renders the honest empty state"
         );
+    }
+
+    /// A Discovery that blocks each `scan()` until `release()` is called, and
+    /// counts how many times `scan()` was invoked.
+    struct BlockingDiscovery {
+        observations: Vec<Observation>,
+        release: Arc<Notify>,
+        call_count: AtomicUsize,
+    }
+
+    impl BlockingDiscovery {
+        fn new(observations: Vec<Observation>) -> Self {
+            Self {
+                observations,
+                release: Arc::new(Notify::new()),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn release(&self) {
+            self.release.notify_waiters();
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Discovery for BlockingDiscovery {
+        fn scan<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<Observation>, DiscoveryError>> + Send + 'a>>
+        {
+            let observations = self.observations.clone();
+            let release = self.release.clone();
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                release.notified().await;
+                Ok(observations)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduler_runs_startup_scan_immediately() {
+        tokio::time::pause();
+
+        let db = open_temp_db("scheduler.startup.sqlite");
+        let db_clone = db.clone();
+        let discovery: Arc<dyn Discovery + Send + Sync> =
+            Arc::new(Scripted::new(vec![vec![observation(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+            )]]));
+        let discovery_clone = discovery.clone();
+
+        let handle = tokio::task::spawn(run_scheduler(
+            db_clone,
+            discovery_clone,
+            "lo".to_string(),
+            300,
+        ));
+
+        // The startup scan runs without advancing time.
+        tokio::task::yield_now().await;
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(
+            devices.len(),
+            1,
+            "startup scan populated the inventory immediately"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduler_runs_scan_every_interval() {
+        tokio::time::pause();
+
+        let db = open_temp_db("scheduler.interval.sqlite");
+        let db_clone = db.clone();
+        let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![
+            vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
+            vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
+        ]));
+        let discovery_clone = discovery.clone();
+
+        let handle = tokio::task::spawn(run_scheduler(
+            db_clone,
+            discovery_clone,
+            "lo".to_string(),
+            300,
+        ));
+
+        // Startup scan ran immediately.
+        tokio::task::yield_now().await;
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].ip, "10.0.0.1");
+
+        // Advance past the interval: the second scan runs and refreshes the IP.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        tokio::task::yield_now().await;
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(
+            devices[0].ip, "10.0.0.2",
+            "second scan ran after the interval"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduler_scans_never_overlap() {
+        tokio::time::pause();
+
+        let db = open_temp_db("scheduler.overlap.sqlite");
+        let db_clone = db.clone();
+        let discovery = Arc::new(BlockingDiscovery::new(vec![observation(
+            "aa:bb:cc:dd:ee:01",
+            "10.0.0.1",
+        )]));
+        let scheduler_discovery: Arc<dyn Discovery + Send + Sync> = discovery.clone();
+
+        let handle = tokio::task::spawn(run_scheduler(
+            db_clone,
+            scheduler_discovery,
+            "lo".to_string(),
+            300,
+        ));
+
+        // Wait for the startup scan to start (it blocks on the discovery).
+        while discovery.call_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(discovery.call_count(), 1, "startup scan started");
+
+        // Advance past the interval while the first scan is still blocked: no
+        // second scan starts while the first is running.
+        tokio::time::advance(Duration::from_secs(300)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            discovery.call_count(),
+            1,
+            "no second scan starts while the first is running"
+        );
+
+        // Release the first scan, let it complete and the scheduler loop back
+        // to its sleep.
+        discovery.release();
+        while discovery.call_count() < 2 {
+            tokio::time::advance(Duration::from_secs(300)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            discovery.call_count(),
+            2,
+            "second scan starts after the first completes"
+        );
+
+        handle.abort();
     }
 }

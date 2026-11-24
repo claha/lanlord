@@ -38,13 +38,15 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// Full Inventory page: frames, counts, table, honest empty state.
 async fn get_root(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let inventory = inventory(&state.db).await;
+    let now = model::now_epoch_seconds();
+    let inventory = inventory(&state.db, now).await;
     Html(render_page(&state.config, &inventory).into_string())
 }
 
 /// Table fragment for HTMX polling: just the `<table>`, nothing else.
 async fn get_table(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let inventory = inventory(&state.db).await;
+    let now = model::now_epoch_seconds();
+    let inventory = inventory(&state.db, now).await;
     Html(render_table(&inventory).into_string())
 }
 
@@ -57,27 +59,33 @@ async fn get_htmx() -> Response {
         .expect("vendored HTMX response builds")
 }
 
-/// Read the Inventory off the database, off the async task pool. A failed
-/// read never takes the page down: render what we know, which at this
-/// milestone is nothing.
-async fn inventory(db: &Arc<Db>) -> Inventory {
-    let db = db.clone();
-    match tokio::task::spawn_blocking(move || list_devices(&db)).await {
+async fn inventory(db: &Arc<Db>, now: u64) -> Inventory {
+    let db_for_start = db.clone();
+    let last_scan_start =
+        match tokio::task::spawn_blocking(move || db_for_start.last_scan_start()).await {
+            Ok(Ok(start)) => start,
+            _ => None,
+        };
+    let db_for_list = db.clone();
+    match tokio::task::spawn_blocking(move || list_devices(&db_for_list, last_scan_start, now))
+        .await
+    {
         Ok(Ok(inventory)) => inventory,
         _ => Inventory::empty(),
     }
 }
 
-fn list_devices(db: &Db) -> Result<Inventory, db::DbError> {
+fn list_devices(db: &Db, last_scan_start: Option<u64>, now: u64) -> Result<Inventory, db::DbError> {
     let devices: Vec<model::Device> = db.list_devices()?;
-    let now = model::now_epoch_seconds();
     let mut new_in_24h = 0usize;
     let devices = devices
         .into_iter()
-        .inspect(|device| {
+        .map(|mut device| {
+            device.present = last_scan_start.is_some_and(|start| device.last_seen >= start);
             if now.saturating_sub(device.first_seen) <= 86_400 {
                 new_in_24h += 1;
             }
+            device
         })
         .collect::<Vec<model::Device>>();
     let total = devices.len();
@@ -145,6 +153,7 @@ fn render_table_rows(inventory: &Inventory) -> Markup {
                 th { "Hostname" }
                 th { "First seen" }
                 th { "Last seen" }
+                th { "Present" }
             }
         }
         tbody {
@@ -163,6 +172,13 @@ fn render_table_rows(inventory: &Inventory) -> Markup {
                         time data-epoch=(device.last_seen.to_string())
                              datetime=(absolute_timestamp(device.last_seen)) {
                             (relative_age(now.saturating_sub(device.last_seen)))
+                        }
+                    }
+                    td {
+                        @if device.present {
+                            "present"
+                        } @else {
+                            "absent"
                         }
                     }
                 }
@@ -226,6 +242,7 @@ mod tests {
     use crate::db::Db;
     use crate::discovery::fake::Scripted;
     use crate::discovery::{Discovery, Observation};
+    use crate::model::now_epoch_seconds;
     use crate::scan::run_scan;
     use axum::body::to_bytes;
     use http::Request;
@@ -331,7 +348,7 @@ mod tests {
                 "new.home.arpa",
             )],
         ]));
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let before = render_table(state_with(db.clone())).await;
@@ -341,7 +358,7 @@ mod tests {
         );
         assert!(!before.contains("new.home.arpa"));
 
-        run_scan(&db, &discovery, "lo")
+        run_scan(&db, &discovery, "lo", now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let after = render_table(state_with(db)).await;

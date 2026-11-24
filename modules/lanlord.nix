@@ -30,14 +30,14 @@ let
 in
 {
   options.lanlord = {
-    enable = mkOption {
-      type = types.bool;
+    enable = lib.mkOption {
+      type = lib.types.bool;
       default = false;
       description = "Enable the lanlord service.";
     };
 
-    package = mkOption {
-      type = types.nullOr types.package;
+    package = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
       default = null;
       description = ''
         The lanlord package to run.
@@ -52,8 +52,8 @@ in
       '';
     };
 
-    interface = mkOption {
-      type = types.str;
+    interface = lib.mkOption {
+      type = lib.types.str;
       default = "";
       description = ''
         Network interface to scan for ARP, e.g. "eth0".
@@ -63,8 +63,8 @@ in
       '';
     };
 
-    subnet = mkOption {
-      type = types.nullOr types.str;
+    subnet = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
         Optional IPv4 segment to scan, e.g. "10.0.0.0/8".
@@ -73,16 +73,16 @@ in
       '';
     };
 
-    scanInterval = mkOption {
-      type = types.int;
+    scanInterval = lib.mkOption {
+      type = lib.types.int;
       default = 300;
       description = ''
         Delay in seconds between scans. The first scan runs at startup.
       '';
     };
 
-    listenAddress = mkOption {
-      type = types.str;
+    listenAddress = lib.mkOption {
+      type = lib.types.str;
       default = "127.0.0.1:8080";
       description = ''
         Address the web UI listens on, e.g. "127.0.0.1:8080" or "0.0.0.0:8080".
@@ -92,8 +92,8 @@ in
       '';
     };
 
-    stateDir = mkOption {
-      type = types.str;
+    stateDir = lib.mkOption {
+      type = lib.types.str;
       default = "/var/lib/lanlord";
       description = ''
         Directory holding the SQLite inventory database.
@@ -103,8 +103,8 @@ in
       '';
     };
 
-    openFirewall = mkOption {
-      type = types.bool;
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
       default = false;
       description = ''
         Open the host firewall for the `lanlord.listenAddress` port.
@@ -115,77 +115,74 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      lib.mkAssert (cfg.interface != null && cfg.interface != "")
-        "lanlord.options.interface is required when lanlord.enable is true"
-    ];
+  config = lib.mkIf cfg.enable (
+    lib.mkAssert (cfg.interface != null && cfg.interface != "")
+      "lanlord.options.interface is required when lanlord.enable is true"
+      {
+        # Dedicated system user and group for the service.
+        users.groups.lanlord = { };
 
-    # Dedicated system user and group for the service.
-    users.groups.lanlord = {
-      system = true;
-    };
+        users.users.lanlord = {
+          isSystemUser = true;
+          group = "lanlord";
+          createHome = false;
+          description = "lanlord service account";
+        };
 
-    users.users.lanlord = {
-      isSystemAccount = true;
-      group = "lanlord";
-      createHome = false;
-      description = "lanlord service account";
-    };
+        systemd.services.lanlord = {
+          description = "lanlord — LAN device inventory";
+          after = [ "network-online.target" ];
+          wants = [ "network-online.target" ];
 
-    systemd.services.lanlord = {
-      description = "lanlord — LAN device inventory";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
+          serviceConfig = {
+            Type = "simple";
+            ExecStart = "${if cfg.package == null then throw "lanlord.options.package must be set when lanlord.enable is true" else cfg.package}/bin/lanlord --config ${lanlordConfig}";
 
-      serviceConfig = {
-        Type = "simple";
-        ExecStart = "${if cfg.package == null then throw "lanlord.options.package must be set when lanlord.enable is true" else cfg.package}/bin/lanlord --config ${lanlordConfig}";
+            # Run as the dedicated service user.
+            User = "lanlord";
+            Group = "lanlord";
 
-        # Run as the dedicated service user.
-        User = "lanlord";
-        Group = "lanlord";
+            # Managed state directory: systemd creates it and chowns it to the
+            # service user; the SQLite database lives there.
+            StateDirectory = "lanlord";
 
-        # Managed state directory: systemd creates it and chowns it to the
-        # service user; the SQLite database lives there.
-        StateDirectory = "lanlord";
+            # `CAP_NET_RAW` is the only added capability: raw sockets for ARP.
+            CapabilityBoundingSet = [ "CAP_NET_RAW" ];
+            AmbientCapabilities = [ "CAP_NET_RAW" ];
 
-        # `CAP_NET_RAW` is the only added capability: raw sockets for ARP.
-        CapabilityBoundingSet = [ "CAP_NET_RAW" ];
-        AmbientCapabilities = [ "CAP_NET_RAW" ];
+            # Sandbox: no new privileges, private /tmp, read-only system, no /home.
+            NoNewPrivileges = true;
+            PrivateTmp = true;
+            ProtectSystem = "strict";
+            ProtectHome = true;
 
-        # Sandbox: no new privileges, private /tmp, read-only system, no /home.
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
+            # AF_PACKET (ARP) must stay available, so do not privatise the
+            # network namespace; restrict the address families instead.
+            RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_NETLINK" "AF_PACKET" ];
+            RestrictNamespaces = true;
 
-        # AF_PACKET (ARP) must stay available, so do not privatise the
-        # network namespace; restrict the address families instead.
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_NETLINK" "AF_PACKET" ];
-        RestrictNamespaces = true;
+            # Only the state directory is writable.
+            ReadWritePaths = [ cfg.stateDir ];
 
-        # Only the state directory is writable.
-        ReadWritePaths = [ cfg.stateDir ];
+            # Log to the journal.
+            StandardOutput = "journal";
+            StandardError = "journal";
+            SyslogIdentifier = "lanlord";
 
-        # Log to the journal.
-        StandardOutput = "journal";
-        StandardError = "journal";
-        SyslogIdentifier = "lanlord";
+            # Further hardening.
+            ProtectClock = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectControlGroups = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            LockPersonality = true;
+          };
+        };
 
-        # Further hardening.
-        ProtectClock = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-      };
-    };
-
-    # Only open the firewall when the operator asks for it.
-    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
-    networking.firewall.allowedUDPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
-  };
+        # Only open the firewall when the operator asks for it.
+        networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
+        networking.firewall.allowedUDPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
+      }
+  );
 }

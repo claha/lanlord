@@ -36,15 +36,22 @@
 
       nixosConfigurations.lanlord = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = { lanlordPackage = lanlordPackages.x86_64-linux.default; };
+        specialArgs = { lanlordPackage = lanlordPackages.x86_64-linux; };
         modules = [
           ./modules/lanlord.nix
-          ({ config, lanlordPackage, ... }: {
-            config.lanlord.enable = true;
-            config.lanlord.interface = "lo";
-            config.lanlord.package = lanlordPackage;
-            config.lanlord.listenAddress = "127.0.0.1:8080";
-            config.lanlord.openFirewall = false;
+          ({ _, lanlordPackage, ... }: {
+            config = {
+              lanlord.enable = true;
+              lanlord.interface = "lo";
+              lanlord.package = lanlordPackage;
+              lanlord.listenAddress = "127.0.0.1:8080";
+              lanlord.openFirewall = false;
+
+              # Dummy values so the configuration is evaluable as a
+              # standalone system (not meant to actually boot).
+              fileSystems."/" = { device = "/dev/sda1"; fsType = "ext4"; };
+              boot.loader.grub.devices = [ "/dev/sda" ];
+            };
           })
         ];
       };

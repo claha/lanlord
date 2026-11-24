@@ -142,6 +142,7 @@ fn render_table_rows(inventory: &Inventory) -> Markup {
             tr {
                 th { "MAC" }
                 th { "IP" }
+                th { "Hostname" }
                 th { "First seen" }
                 th { "Last seen" }
             }
@@ -151,6 +152,7 @@ fn render_table_rows(inventory: &Inventory) -> Markup {
                 tr {
                     td { (&device.mac) }
                     td { (&device.ip) }
+                    td { (device.hostname.as_deref().unwrap_or("—")) }
                     td {
                         time data-epoch=(device.first_seen.to_string())
                              datetime=(absolute_timestamp(device.first_seen)) {
@@ -212,5 +214,144 @@ fn absolute_timestamp(epoch_seconds: u64) -> String {
     match time::OffsetDateTime::from_unix_timestamp(epoch_seconds as i64) {
         Ok(datetime) => datetime.format(&format).expect("datetime formats"),
         Err(_) => epoch_seconds.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        Config, DEFAULT_DATABASE_PATH, DEFAULT_LISTEN_ADDRESS, DEFAULT_SCAN_INTERVAL_SECONDS,
+    };
+    use crate::db::Db;
+    use crate::discovery::fake::Scripted;
+    use crate::discovery::{Discovery, Observation};
+    use crate::scan::run_scan;
+    use axum::body::to_bytes;
+    use http::Request;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn observation_with_hostname(mac: &str, ip: &str, hostname: &str) -> Observation {
+        Observation {
+            mac: mac.to_string(),
+            ip: ip.parse().unwrap(),
+            hostname: Some(hostname.to_string()),
+        }
+    }
+
+    fn open_temp_db(name: &str) -> Arc<Db> {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        Arc::new(Db::open(&path).expect("test database opens"))
+    }
+
+    fn state_with(db: Arc<Db>) -> Arc<AppState> {
+        Arc::new(AppState {
+            db,
+            config: Config {
+                interface: "lo".to_string(),
+                subnet: None,
+                scan_interval: DEFAULT_SCAN_INTERVAL_SECONDS,
+                listen: DEFAULT_LISTEN_ADDRESS.to_string(),
+                database: DEFAULT_DATABASE_PATH.to_string(),
+            },
+            discovery: Arc::new(Scripted::new(Vec::new())),
+        })
+    }
+
+    async fn render_table(state: Arc<AppState>) -> String {
+        let app = router().with_state(state);
+        let request = Request::builder()
+            .uri("/table")
+            .body(axum::body::Body::empty())
+            .expect("request builds");
+        let response = app.oneshot(request).await.expect("router responds");
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    #[tokio::test]
+    async fn table_renders_hostname_value_when_present() {
+        let db = open_temp_db("lanlord.test.web.hostname-present.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device(
+            "aa:bb:cc:dd:ee:01",
+            "10.0.0.1",
+            Some("gateway.home.arpa"),
+            now,
+        )
+        .expect("insert succeeds");
+        let body = render_table(state_with(db)).await;
+        assert!(
+            body.contains("<th>Hostname</th>"),
+            "table has a Hostname column: {body}"
+        );
+        assert!(
+            body.contains("gateway.home.arpa"),
+            "resolved hostname renders: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn table_renders_empty_marker_when_hostname_unknown() {
+        let db = open_temp_db("lanlord.test.web.hostname-marker.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device("aa:bb:cc:dd:ee:01", "10.0.0.1", None, now)
+            .expect("insert succeeds");
+        let body = render_table(state_with(db)).await;
+        assert!(
+            body.contains("<th>Hostname</th>"),
+            "table has a Hostname column: {body}"
+        );
+        assert!(
+            body.contains("—"),
+            "empty marker renders for unknown hostname: {body}"
+        );
+        assert!(
+            !body.contains("None"),
+            "renders a marker, not a debug string: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hostname_updates_after_a_later_scan() {
+        let db = open_temp_db("lanlord.test.web.hostname-update.sqlite");
+        let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![
+            vec![observation_with_hostname(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+                "old.home.arpa",
+            )],
+            vec![observation_with_hostname(
+                "aa:bb:cc:dd:ee:01",
+                "10.0.0.1",
+                "new.home.arpa",
+            )],
+        ]));
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("first scan succeeds");
+        let before = render_table(state_with(db.clone())).await;
+        assert!(
+            before.contains("old.home.arpa"),
+            "first hostname renders: {before}"
+        );
+        assert!(!before.contains("new.home.arpa"));
+
+        run_scan(&db, &discovery, "lo")
+            .await
+            .expect("repeat scan succeeds");
+        let after = render_table(state_with(db)).await;
+        assert!(
+            after.contains("new.home.arpa"),
+            "updated hostname renders: {after}"
+        );
+        assert!(
+            !after.contains("old.home.arpa"),
+            "old hostname no longer renders: {after}"
+        );
     }
 }

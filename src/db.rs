@@ -78,20 +78,29 @@ impl Db {
     }
 
     /// Upsert a Device observed in a Scan: insert a new Device with First seen
-    /// and Last seen set to `now`; on an existing MAC, refresh the IP and Last
-    /// seen but never touch First seen.
-    pub fn upsert_device(&self, mac: &str, ip: &str, now: u64) -> Result<(), DbError> {
+    /// and Last seen set to `now`; on an existing MAC, refresh the IP, the
+    /// hostname and Last seen but never touch First seen. A `None` hostname
+    /// (failed reverse lookup) stores nothing and leaves the other fields as
+    /// they were.
+    pub fn upsert_device(
+        &self,
+        mac: &str,
+        ip: &str,
+        hostname: Option<&str>,
+        now: u64,
+    ) -> Result<(), DbError> {
         let conn = self
             .conn
             .lock()
             .expect("database connection mutex is not poisoned");
         conn.execute(
             "INSERT INTO devices (mac, ip, hostname, first_seen, last_seen)
-             VALUES (?1, ?2, NULL, ?3, ?3)
+             VALUES (?1, ?2, ?3, ?4, ?4)
              ON CONFLICT(mac) DO UPDATE SET
                  ip = excluded.ip,
+                 hostname = excluded.hostname,
                  last_seen = excluded.last_seen",
-            (mac, ip, now),
+            (mac, ip, hostname, now),
         )
         .map_err(DbError::Write)?;
         Ok(())
@@ -116,7 +125,7 @@ mod tests {
     fn upsert_device_inserts_new_device_with_first_and_last_seen() {
         let db = open_test_db("lanlord.test.db.upsert-insert.sqlite");
         let now = model::now_epoch_seconds();
-        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", now)
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", None, now)
             .expect("insert succeeds");
         let devices = db.list_devices().expect("list succeeds");
         assert_eq!(devices.len(), 1);
@@ -128,13 +137,35 @@ mod tests {
     }
 
     #[test]
+    fn upsert_device_stores_hostname_on_insert() {
+        let db = open_test_db("lanlord.test.db.hostname-insert.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device(
+            "aa:bb:cc:dd:ee:ff",
+            "10.0.0.1",
+            Some("gateway.home.arpa"),
+            now,
+        )
+        .expect("insert succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(devices[0].ip, "10.0.0.1");
+        assert_eq!(
+            devices[0].hostname.as_deref(),
+            Some("gateway.home.arpa"),
+            "resolved hostname is stored"
+        );
+    }
+
+    #[test]
     fn upsert_device_repeat_updates_ip_and_last_seen_keeps_first_seen() {
         let db = open_test_db("lanlord.test.db.upsert-repeat.sqlite");
         let now = model::now_epoch_seconds();
-        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", now)
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", None, now)
             .expect("first insert succeeds");
         let later = now + 10;
-        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.2", later)
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.2", None, later)
             .expect("repeat upsert succeeds");
         let devices = db.list_devices().expect("list succeeds");
         assert_eq!(devices.len(), 1, "no duplicate device is created");
@@ -145,5 +176,55 @@ mod tests {
             "first seen is never overwritten"
         );
         assert_eq!(devices[0].last_seen, later, "last seen is refreshed");
+    }
+
+    #[test]
+    fn upsert_device_refreshes_hostname_when_it_changes() {
+        let db = open_test_db("lanlord.test.db.hostname-refresh.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", Some("old.home.arpa"), now)
+            .expect("first upsert succeeds");
+        let first_seen = db.list_devices().expect("list succeeds")[0].first_seen;
+        let later = now + 10;
+        db.upsert_device(
+            "aa:bb:cc:dd:ee:ff",
+            "10.0.0.2",
+            Some("new.home.arpa"),
+            later,
+        )
+        .expect("repeat upsert succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].ip, "10.0.0.2", "most recent IP wins");
+        assert_eq!(
+            devices[0].hostname.as_deref(),
+            Some("new.home.arpa"),
+            "hostname is refreshed"
+        );
+        assert_eq!(
+            devices[0].first_seen, first_seen,
+            "first seen is never overwritten"
+        );
+    }
+
+    #[test]
+    fn upsert_device_without_hostname_stores_nothing_and_keeps_other_fields() {
+        let db = open_test_db("lanlord.test.db.hostname-none.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device(
+            "aa:bb:cc:dd:ee:ff",
+            "10.0.0.1",
+            Some("gateway.home.arpa"),
+            now,
+        )
+        .expect("first upsert succeeds");
+        let later = now + 10;
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.2", None, later)
+            .expect("repeat upsert without hostname succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].hostname, None, "failed lookup stores nothing");
+        assert_eq!(devices[0].ip, "10.0.0.2", "ip is still refreshed");
+        assert_eq!(devices[0].last_seen, later, "last seen is still refreshed");
     }
 }

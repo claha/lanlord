@@ -29,8 +29,10 @@ jobs:
             command: cargo fmt --check
           - check: clippy
             command: cargo clippy --all-targets -- -D warnings
+            cache_cargo: true
           - check: test
             command: cargo test
+            cache_cargo: true
           - check: build
             command: nix build
     steps:
@@ -44,8 +46,12 @@ jobs:
         with:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'Cargo.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
+          # Only the build job writes the cache, so concurrent jobs do not race
+          # to save the same key.
+          save: ${{ matrix.check == 'build' }}
 
       - name: Restore cargo artefacts
+        if: matrix.cache_cargo
         uses: actions/cache@v6
         with:
           path: |

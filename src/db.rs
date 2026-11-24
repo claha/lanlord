@@ -24,6 +24,8 @@ pub enum DbError {
     Migration(#[source] rusqlite::Error),
     #[error("failed to read the inventory: {0}")]
     Query(#[source] rusqlite::Error),
+    #[error("failed to write to the inventory: {0}")]
+    Write(#[source] rusqlite::Error),
 }
 
 impl Db {
@@ -74,8 +76,74 @@ impl Db {
             .map_err(DbError::Query)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(DbError::Query)
     }
+
+    /// Upsert a Device observed in a Scan: insert a new Device with First seen
+    /// and Last seen set to `now`; on an existing MAC, refresh the IP and Last
+    /// seen but never touch First seen.
+    pub fn upsert_device(&self, mac: &str, ip: &str, now: u64) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("database connection mutex is not poisoned");
+        conn.execute(
+            "INSERT INTO devices (mac, ip, hostname, first_seen, last_seen)
+             VALUES (?1, ?2, NULL, ?3, ?3)
+             ON CONFLICT(mac) DO UPDATE SET
+                 ip = excluded.ip,
+                 last_seen = excluded.last_seen",
+            (mac, ip, now),
+        )
+        .map_err(DbError::Write)?;
+        Ok(())
+    }
 }
 
 fn path_display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_test_db(name: &str) -> Db {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path); // ignore missing
+        Db::open(&path).expect("test database opens")
+    }
+
+    #[test]
+    fn upsert_device_inserts_new_device_with_first_and_last_seen() {
+        let db = open_test_db("lanlord.test.db.upsert-insert.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", now)
+            .expect("insert succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(devices[0].ip, "10.0.0.1");
+        assert_eq!(devices[0].hostname, None);
+        assert_eq!(devices[0].first_seen, now);
+        assert_eq!(devices[0].last_seen, now);
+    }
+
+    #[test]
+    fn upsert_device_repeat_updates_ip_and_last_seen_keeps_first_seen() {
+        let db = open_test_db("lanlord.test.db.upsert-repeat.sqlite");
+        let now = model::now_epoch_seconds();
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", now)
+            .expect("first insert succeeds");
+        let later = now + 10;
+        db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.2", later)
+            .expect("repeat upsert succeeds");
+        let devices = db.list_devices().expect("list succeeds");
+        assert_eq!(devices.len(), 1, "no duplicate device is created");
+        assert_eq!(devices[0].mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(devices[0].ip, "10.0.0.2", "most recent IP wins");
+        assert_eq!(
+            devices[0].first_seen, now,
+            "first seen is never overwritten"
+        );
+        assert_eq!(devices[0].last_seen, later, "last seen is refreshed");
+    }
 }

@@ -4,6 +4,7 @@ use hyper_util::rt::TokioIo;
 use lanlord::config;
 use lanlord::db::Db;
 use lanlord::discovery::ArpDiscovery;
+use lanlord::scan;
 use lanlord::web::{self, AppState};
 use std::convert::Infallible;
 use std::future::Future;
@@ -28,11 +29,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     config::validate(&config)?;
 
     let db = Arc::new(Db::open(&config.database)?);
+    let discovery = ArpDiscovery::new(config.interface.clone(), config.subnet.clone())?;
     let state = Arc::new(AppState {
         db,
         config,
-        discovery: Arc::new(ArpDiscovery),
+        discovery: Arc::new(discovery),
     });
+
+    // Run one startup Scan before serving. A Scan failure is logged with its
+    // cause and the process keeps serving the last known Inventory; genuine
+    // misconfiguration has already failed fast in `config::validate`.
+    if let Err(error) = scan::run_scan(&state.db, &state.discovery, &state.config.interface).await {
+        eprintln!("lanlord: startup scan failed: {error}");
+    }
 
     // `with_state` provides the router its state and turns
     // `Router<Arc<AppState>>` into `Router<()>`, the only router type that is

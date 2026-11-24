@@ -18,7 +18,7 @@
             pname = "lanlord";
             version = "0.1.0";
             src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoHash = pkgs.lib.fakeHash;
             meta = {
               description = "Self-hosted LAN device inventory for homelabs";
               license = pkgs.lib.licenses.mit;

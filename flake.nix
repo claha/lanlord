@@ -19,6 +19,8 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [ pkgs.pkg-config ];
+            buildInputs = [ pkgs.sqlite ];
             meta = {
               description = "Self-hosted LAN device inventory for homelabs";
               license = pkgs.lib.licenses.mit;

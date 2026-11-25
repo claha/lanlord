@@ -7,11 +7,14 @@ use std::os::raw::c_int;
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::interface;
+use crate::model::Mac;
+
 /// One observation from a Scan: a MAC address, the IPv4 address it had at
 /// that moment, and an optional reverse-DNS hostname for that address.
 #[derive(Clone, Debug)]
 pub struct Observation {
-    pub mac: String,
+    pub mac: Mac,
     pub ip: Ipv4Addr,
     pub hostname: Option<String>,
 }
@@ -131,84 +134,18 @@ impl Discovery for ArpDiscovery {
 fn derive_interface(
     interface: &str,
 ) -> Result<(Ipv4Addr, [u8; 6], Ipv4Addr, Ipv4Addr), DiscoveryError> {
-    unsafe {
-        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut head) != 0 {
-            return Err(DiscoveryError::Failed("getifaddrs failed".to_string()));
-        }
-        let mut own_ip = None;
-        let mut mask = None;
-        let mut entry = head;
-        while !entry.is_null() {
-            let item = &*entry;
-            let name = CStr::from_ptr(item.ifa_name).to_string_lossy();
-            if name == interface
-                && !item.ifa_addr.is_null()
-                && (*item.ifa_addr).sa_family as c_int == libc::AF_INET
-            {
-                let socket = &*(item.ifa_addr as *const libc::sockaddr as *const libc::sockaddr_in);
-                own_ip = Some(Ipv4Addr::from(socket.sin_addr.s_addr.to_be_bytes()));
-                if !item.ifa_netmask.is_null() {
-                    let netmask =
-                        &*(item.ifa_netmask as *const libc::sockaddr as *const libc::sockaddr_in);
-                    mask = Some(Ipv4Addr::from(netmask.sin_addr.s_addr.to_be_bytes()));
-                }
-            }
-            entry = item.ifa_next;
-        }
-        libc::freeifaddrs(head);
-
-        let (own_ip, mask) = match (own_ip, mask) {
-            (Some(ip), Some(mask)) => (ip, mask),
-            _ => {
-                return Err(DiscoveryError::Failed(format!(
-                    "interface {interface} has no usable IPv4 address and netmask"
-                )));
-            }
-        };
-
-        let own_mac = interface_mac(interface)?;
-        let network = ip_to_u32(own_ip) & ip_to_u32(mask);
-        Ok((own_ip, own_mac, Ipv4Addr::from(network.to_be_bytes()), mask))
-    }
-}
-
-/// Read the MAC address of `interface` via ioctl(SIOCGIFHWADDR).
-fn interface_mac(interface: &str) -> Result<[u8; 6], DiscoveryError> {
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-        if fd < 0 {
-            return Err(DiscoveryError::Failed(
-                "failed to create socket for interface query".to_string(),
-            ));
-        }
-        let result = {
-            let c_interface = CString::new(interface).map_err(|_| {
-                DiscoveryError::Failed(format!("invalid interface name {interface:?}"))
-            })?;
-            let mut ifr: libc::ifreq = std::mem::zeroed();
-            let name_bytes = c_interface.as_bytes_with_nul();
-            for (i, &byte) in name_bytes[..name_bytes.len() - 1].iter().enumerate() {
-                ifr.ifr_name[i] = byte as i8;
-            }
-            if libc::ioctl(fd, libc::SIOCGIFHWADDR, &mut ifr) != 0 {
-                Err(DiscoveryError::Failed(format!(
-                    "ioctl(SIOCGIFHWADDR) failed for {interface}"
-                )))
-            } else {
-                Ok([
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[0] as u8,
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[1] as u8,
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[2] as u8,
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[3] as u8,
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[4] as u8,
-                    ifr.ifr_ifru.ifru_hwaddr.sa_data[5] as u8,
-                ])
-            }
-        };
-        let _ = libc::close(fd);
-        result
-    }
+    let (own_ip, mask) = interface::interface_ipv4_with_netmask(interface).ok_or_else(|| {
+        DiscoveryError::Failed(format!(
+            "interface {interface} has no usable IPv4 address and netmask"
+        ))
+    })?;
+    let own_mac = interface::mac_of(interface).map_err(|error| {
+        DiscoveryError::Failed(format!(
+            "failed to read MAC address of {interface}: {error}"
+        ))
+    })?;
+    let network = ip_to_u32(own_ip) & ip_to_u32(mask);
+    Ok((own_ip, own_mac, Ipv4Addr::from(network.to_be_bytes()), mask))
 }
 
 fn parse_cidr(cidr: &str) -> Result<Segment, DiscoveryError> {
@@ -393,13 +330,13 @@ fn sweep(
                 if mac == own_mac || ip == own_ip {
                     continue; // never report the scanner itself
                 }
-                let mac_text = format_mac(mac);
+                let mac_text = interface::format_mac(mac);
                 if !observations
                     .iter()
-                    .any(|obs: &Observation| obs.mac == mac_text && obs.ip == ip)
+                    .any(|obs: &Observation| obs.mac == mac_text.as_str() && obs.ip == ip)
                 {
                     observations.push(Observation {
-                        mac: mac_text,
+                        mac: Mac::new(mac_text),
                         ip,
                         hostname: None,
                     });
@@ -410,13 +347,6 @@ fn sweep(
         let _ = libc::close(fd);
         result
     }
-}
-
-fn format_mac(bytes: [u8; 6]) -> String {
-    format!(
-        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
-    )
 }
 
 /// Reverse-DNS (PTR) lookup for `ip`: the hostname the system resolver knows
@@ -502,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn scripted_fake_returns_observations_in_order() {
         let observation = Observation {
-            mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            mac: Mac::new("aa:bb:cc:dd:ee:ff"),
             ip: "10.0.0.1".parse().unwrap(),
             hostname: None,
         };

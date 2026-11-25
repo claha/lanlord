@@ -180,9 +180,9 @@ in
           };
         };
 
-        # Only open the firewall when the operator asks for it.
+        # Only open the firewall when the operator asks for it. lanlord is
+        # TCP-only HTTP; no UDP ports are opened.
         networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
-        networking.firewall.allowedUDPPorts = lib.mkIf cfg.openFirewall [ lanlordPort ];
       }
   );
 }

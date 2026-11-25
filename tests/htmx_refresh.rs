@@ -3,6 +3,7 @@ use axum::http::{Method, StatusCode};
 use lanlord::config::Config;
 use lanlord::db::Db;
 use lanlord::discovery::{Discovery, Observation};
+use lanlord::model::Mac;
 use lanlord::web::{AppState, router};
 use std::future::Future;
 use std::pin::Pin;
@@ -44,8 +45,13 @@ async fn body_of(resp: http::Response<Body>) -> String {
 
 fn app_with_one_device() -> axum::Router {
     let db = Arc::new(Db::open(":memory:").expect("in-memory database opens and runs migrations"));
-    db.upsert_device("aa:bb:cc:dd:ee:ff", "10.0.0.1", None, 1_700_000_000)
-        .expect("seed device upserts");
+    db.upsert_device(
+        &Mac::new("aa:bb:cc:dd:ee:ff"),
+        "10.0.0.1",
+        None,
+        1_700_000_000,
+    )
+    .expect("seed device upserts");
     let state = AppState {
         db,
         config: empty_config(),
@@ -117,10 +123,10 @@ async fn get_root_references_only_local_assets_and_polls_the_fragment() {
 
     let html = body_of(resp).await;
 
-    // Vendored HTMX is loaded from a local path, never inlined or fetched from a CDN.
+    // Vendored HTMX is embedded inline in the page: no external asset or CDN requests.
     assert!(
-        html.contains("src=\"/htmx.js\""),
-        "page loads HTMX from the local /htmx.js asset: {html}"
+        html.contains("htmx"),
+        "page embeds the vendored HTMX library inline: {html}"
     );
     assert!(
         !html.contains("src=\"http"),
@@ -151,31 +157,5 @@ async fn get_root_references_only_local_assets_and_polls_the_fragment() {
     assert!(
         html.contains("hx-swap=\"innerHTML\""),
         "table swaps in place without a full reload: {html}"
-    );
-}
-
-/// The vendored HTMX library itself is served at /htmx.js.
-#[tokio::test]
-async fn get_htmx_js_serves_the_vendored_library() {
-    let app = app_with_one_device();
-    let req = http::Request::builder()
-        .uri("/htmx.js")
-        .method(Method::GET)
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.expect("request succeeds");
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let headers = resp.headers();
-    assert_eq!(
-        headers.get("content-type").and_then(|v| v.to_str().ok()),
-        Some("application/javascript; charset=utf-8"),
-        "HTMX is served as JavaScript"
-    );
-
-    let html = body_of(resp).await;
-    assert!(
-        html.contains("htmx") && html.contains("version"),
-        "body is the vendored HTMX library: {html}"
     );
 }

@@ -1,28 +1,35 @@
 use crate::db::Db;
 use crate::discovery::{self, Discovery, Observation};
+use crate::interface::{format_mac, ipv4_addrs_of, mac_of};
 use crate::model::now_epoch_seconds;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+
+/// Bundles the state a Scan needs: the inventory database, the discovery
+/// implementation, and the interface to scan. Passing it around keeps
+/// `run_scan` and `run_scheduler` from taking the same arguments separately.
+#[derive(Clone)]
+pub struct ScanContext {
+    pub db: Arc<Db>,
+    pub discovery: Arc<dyn Discovery + Send + Sync>,
+    pub interface: String,
+}
 
 /// Apply one Scan to the Inventory: collect observations from the `Discovery`
 /// implementation, drop the scanner's own addresses, and upsert each remaining
 /// observation by MAC. First seen is set only on first insert; Last seen and IP
 /// are refreshed on every observation. `now` is the scan's start time and is
 /// recorded as the last scan start time for presence derivation.
-pub async fn run_scan(
-    db: &Arc<Db>,
-    discovery: &Arc<dyn Discovery + Send + Sync>,
-    interface: &str,
-    now: u64,
-) -> Result<Vec<Observation>, ScanError> {
-    let observations = discovery.scan().await.map_err(ScanError::Discovery)?;
+pub async fn run_scan(ctx: &ScanContext, now: u64) -> Result<Vec<Observation>, ScanError> {
+    let observations = ctx.discovery.scan().await.map_err(ScanError::Discovery)?;
 
-    let own = match scanner_addresses(interface) {
+    let own = match scanner_addresses(&ctx.interface) {
         Ok(own) => own,
         Err(error) => {
             eprintln!(
-                "lanlord: could not determine scanner's own addresses for {interface}: {error}; \
-                 not excluding any addresses from the scan"
+                "lanlord: could not determine scanner's own addresses for {}: {error}; \
+                 not excluding any addresses from the scan",
+                ctx.interface
             );
             OwnAddresses::default()
         }
@@ -33,33 +40,55 @@ pub async fn run_scan(
         .filter(|obs| !own.matches(obs))
         .collect::<Vec<_>>();
     for obs in &observations {
-        db.upsert_device(&obs.mac, &obs.ip.to_string(), obs.hostname.as_deref(), now)
+        ctx.db
+            .upsert_device(&obs.mac, &obs.ip.to_string(), obs.hostname.as_deref(), now)
             .map_err(ScanError::Inventory)?;
     }
-    db.set_last_scan_start(now).map_err(ScanError::Inventory)?;
+    ctx.db
+        .set_last_scan_start(now)
+        .map_err(ScanError::Inventory)?;
     Ok(observations)
 }
 
 /// Run the Scan scheduler: one startup Scan immediately, then one every
 /// `interval_secs` seconds. Scans never overlap — each Scan completes before
 /// the next one is scheduled, so a long Scan delays the next instead of
-/// stacking. Runs forever; intended to be spawned as a tokio task alongside
-/// the HTTP server.
-pub async fn run_scheduler(
-    db: Arc<Db>,
-    discovery: Arc<dyn Discovery + Send + Sync>,
-    interface: String,
-    interval_secs: u64,
-) {
+/// stacking. Every Scan outcome (success or failure) is logged with its
+/// duration; a failure is logged with its cause and does not stop the
+/// scheduler, so the last known Inventory is kept. Runs forever; intended to
+/// be spawned as a tokio task alongside the HTTP server.
+pub async fn run_scheduler(ctx: ScanContext, interval_secs: u64) {
     // One startup Scan immediately.
     let now = now_epoch_seconds();
-    let _ = run_scan(&db, &discovery, &interface, now).await;
+    run_and_log(&ctx, now).await;
 
     // Then one Scan every interval, never overlapping.
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
         let now = now_epoch_seconds();
-        let _ = run_scan(&db, &discovery, &interface, now).await;
+        run_and_log(&ctx, now).await;
+    }
+}
+
+/// Run a single Scan and log its outcome and duration as structured `key=value`
+/// lines to stdout (journald). A failure is logged with its cause and swallowed
+/// so the scheduler keeps running and retries on the next interval; the
+/// existing Inventory is never discarded.
+async fn run_and_log(ctx: &ScanContext, now: u64) {
+    let start = std::time::Instant::now();
+    let result = run_scan(ctx, now).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    match result {
+        Ok(observations) => println!(
+            "event=scan outcome=success duration_ms={} interface={} observations={}",
+            duration_ms,
+            ctx.interface,
+            observations.len()
+        ),
+        Err(error) => println!(
+            "event=scan outcome=failure duration_ms={} interface={} cause={}",
+            duration_ms, ctx.interface, error
+        ),
     }
 }
 
@@ -80,63 +109,17 @@ struct OwnAddresses {
 
 impl OwnAddresses {
     fn matches(&self, observation: &Observation) -> bool {
-        observation.mac == self.mac || self.ips.contains(&observation.ip)
+        observation.mac == self.mac.as_str() || self.ips.contains(&observation.ip)
     }
 }
 
-/// Read the MAC and IPv4 addresses assigned to `interface`.
+/// Read the scanner's own MAC and IPv4 addresses assigned to `interface`,
+/// delegating to the shared helpers in `crate::interface`. A MAC that cannot
+/// be read is degraded to an empty string (no exclusion) rather than failing
+/// the whole scan; the caller logs that degradation.
 fn scanner_addresses(interface: &str) -> Result<OwnAddresses, std::io::Error> {
-    use std::ffi::CStr;
-
-    let mut mac = String::new();
-    let mut ips = Vec::new();
-
-    unsafe {
-        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut head) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut entry = head;
-        while !entry.is_null() {
-            let item = &*entry;
-            let name = CStr::from_ptr(item.ifa_name).to_string_lossy();
-            if name == interface
-                && !item.ifa_addr.is_null()
-                && (*item.ifa_addr).sa_family as std::os::raw::c_int == libc::AF_INET
-            {
-                let socket = &*(item.ifa_addr as *const libc::sockaddr as *const libc::sockaddr_in);
-                ips.push(Ipv4Addr::from(socket.sin_addr.s_addr.to_be_bytes()));
-            }
-            entry = item.ifa_next;
-        }
-        libc::freeifaddrs(head);
-
-        // The interface's MAC address via ioctl(SIOCGIFHWADDR).
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
-        if fd >= 0 {
-            let mut ifr: libc::ifreq = std::mem::zeroed();
-            let name_bytes = interface.as_bytes();
-            if name_bytes.len() < ifr.ifr_name.len() {
-                for (i, &byte) in name_bytes.iter().enumerate() {
-                    ifr.ifr_name[i] = byte as i8;
-                }
-                if libc::ioctl(fd, libc::SIOCGIFHWADDR, &mut ifr) == 0 {
-                    let hardware = ifr.ifr_ifru.ifru_hwaddr.sa_data;
-                    mac = format!(
-                        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                        hardware[0] as u8,
-                        hardware[1] as u8,
-                        hardware[2] as u8,
-                        hardware[3] as u8,
-                        hardware[4] as u8,
-                        hardware[5] as u8,
-                    );
-                }
-            }
-            let _ = libc::close(fd);
-        }
-    }
-
+    let mac = mac_of(interface).map(format_mac)?;
+    let ips = ipv4_addrs_of(interface);
     Ok(OwnAddresses { mac, ips })
 }
 
@@ -147,6 +130,7 @@ mod tests {
         Config, DEFAULT_DATABASE_PATH, DEFAULT_LISTEN_ADDRESS, DEFAULT_SCAN_INTERVAL_SECONDS,
     };
     use crate::discovery::fake::Scripted;
+    use crate::model::Mac;
     use crate::web::{self, AppState};
     use axum::body::to_bytes;
     use http::Request;
@@ -163,7 +147,7 @@ mod tests {
 
     fn observation(mac: &str, ip: &str) -> Observation {
         Observation {
-            mac: mac.to_string(),
+            mac: Mac::new(mac),
             ip: ip.parse().unwrap(),
             hostname: None,
         }
@@ -171,7 +155,7 @@ mod tests {
 
     fn observation_with_hostname(mac: &str, ip: &str, hostname: &str) -> Observation {
         Observation {
-            mac: mac.to_string(),
+            mac: Mac::new(mac),
             ip: ip.parse().unwrap(),
             hostname: Some(hostname.to_string()),
         }
@@ -184,6 +168,16 @@ mod tests {
             scan_interval: DEFAULT_SCAN_INTERVAL_SECONDS,
             listen: DEFAULT_LISTEN_ADDRESS.to_string(),
             database: DEFAULT_DATABASE_PATH.to_string(),
+        }
+    }
+
+    /// Build a `ScanContext` scanning the loopback interface over `db` and
+    /// `discovery`, cloning the shared handles so the caller keeps using them.
+    fn ctx_for(db: &Arc<Db>, discovery: &Arc<dyn Discovery + Send + Sync>) -> ScanContext {
+        ScanContext {
+            db: db.clone(),
+            discovery: discovery.clone(),
+            interface: "lo".to_string(),
         }
     }
 
@@ -202,7 +196,7 @@ mod tests {
                 "10.0.0.1",
             )]]));
         let now = 1_700_000_000;
-        run_scan(&db, &discovery, "lo", now)
+        run_scan(&ctx_for(&db, &discovery), now)
             .await
             .expect("scan succeeds");
         assert_eq!(
@@ -220,7 +214,7 @@ mod tests {
             observation("aa:bb:cc:dd:ee:02", "10.0.0.2"),
         ]]));
         let before = now_epoch_seconds();
-        let observed = run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        let observed = run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let after = now_epoch_seconds();
@@ -251,7 +245,7 @@ mod tests {
             observation_with_hostname("aa:bb:cc:dd:ee:01", "10.0.0.1", "gateway.home.arpa"),
             observation("aa:bb:cc:dd:ee:02", "10.0.0.2"),
         ]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -287,10 +281,10 @@ mod tests {
                 "new.home.arpa",
             )],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -303,9 +297,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_without_hostname_stores_nothing_without_failing() {
+    async fn scan_without_hostname_keeps_existing_hostname() {
         // A failed reverse lookup yields no hostname: the scan still succeeds
         // and the device row is written without disturbing its other fields.
+        // A previously resolved hostname is preserved; only the IP is refreshed.
         let db = open_temp_db("lanlord.test.scan.hostname-none.sqlite");
         let discovery: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![
             vec![observation_with_hostname(
@@ -315,15 +310,19 @@ mod tests {
             )],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("scan without hostname still succeeds");
         let devices = db.list_devices().expect("list succeeds");
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].hostname, None, "failed lookup stores nothing");
+        assert_eq!(
+            devices[0].hostname.as_deref(),
+            Some("old.home.arpa"),
+            "existing hostname is preserved when the lookup fails"
+        );
         assert_eq!(devices[0].ip, "10.0.0.2", "most recent IP still wins");
     }
 
@@ -334,14 +333,14 @@ mod tests {
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.2")],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
         let first_seen = devices[0].first_seen;
         let last_seen_after_first = devices[0].last_seen;
 
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -368,7 +367,7 @@ mod tests {
             ],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -379,7 +378,7 @@ mod tests {
             .unwrap()
             .last_seen;
 
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("second scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -399,17 +398,17 @@ mod tests {
             vec![],
             vec![observation("aa:bb:cc:dd:ee:01", "10.0.0.1")],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
         let last_seen_before_absence = devices[0].last_seen;
 
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("absence scan succeeds");
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("return scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -429,7 +428,7 @@ mod tests {
             observation("00:00:00:00:00:00", "127.0.0.1"),
             observation("aa:bb:cc:dd:ee:01", "10.0.0.1"),
         ]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("scan succeeds");
         let devices = db.list_devices().expect("list succeeds");
@@ -446,13 +445,13 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
 
         // Exhaust the scripted outcomes so the next scan fails.
         let failing: Arc<dyn Discovery + Send + Sync> = Arc::new(Scripted::new(vec![]));
-        let error = run_scan(&db, &failing, "lo", now_epoch_seconds())
+        let error = run_scan(&ctx_for(&db, &failing), now_epoch_seconds())
             .await
             .unwrap_err();
         assert!(
@@ -486,7 +485,7 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("scan A");
         // Space the scans a second apart so Last seen differs.
@@ -496,7 +495,7 @@ mod tests {
                 "aa:bb:cc:dd:ee:02",
                 "10.0.0.2",
             )]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("scan B");
 
@@ -520,7 +519,7 @@ mod tests {
                 "aa:bb:cc:dd:ee:01",
                 "10.0.0.1",
             )]]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&ctx_for(&db, &discovery), now_epoch_seconds())
             .await
             .expect("scan succeeds");
         let state = Arc::new(AppState {
@@ -605,9 +604,11 @@ mod tests {
         let discovery_clone = discovery.clone();
 
         let handle = tokio::task::spawn(run_scheduler(
-            db_clone,
-            discovery_clone,
-            "lo".to_string(),
+            ScanContext {
+                db: db_clone,
+                discovery: discovery_clone,
+                interface: "lo".to_string(),
+            },
             300,
         ));
 
@@ -636,9 +637,11 @@ mod tests {
         let discovery_clone = discovery.clone();
 
         let handle = tokio::task::spawn(run_scheduler(
-            db_clone,
-            discovery_clone,
-            "lo".to_string(),
+            ScanContext {
+                db: db_clone,
+                discovery: discovery_clone,
+                interface: "lo".to_string(),
+            },
             300,
         ));
 
@@ -673,9 +676,11 @@ mod tests {
         let scheduler_discovery: Arc<dyn Discovery + Send + Sync> = discovery.clone();
 
         let handle = tokio::task::spawn(run_scheduler(
-            db_clone,
-            scheduler_discovery,
-            "lo".to_string(),
+            ScanContext {
+                db: db_clone,
+                discovery: scheduler_discovery,
+                interface: "lo".to_string(),
+            },
             300,
         ));
 

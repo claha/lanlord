@@ -41,7 +41,7 @@ fn app_with_devices(
 ) -> axum::Router {
     let db = Db::open(":memory:").expect("in-memory database opens and runs migrations");
     for (mac, ip, _first_seen, last_seen) in devices {
-        db.upsert_device(mac, ip, None, *last_seen)
+        db.upsert_device(&model::Mac::new(*mac), ip, None, *last_seen)
             .expect("upsert succeeds");
     }
     if let Some(start) = last_scan_start {
@@ -113,11 +113,11 @@ async fn absent_device_renders_as_absent() {
         "absent device keeps its row: {html}"
     );
     assert!(
-        html.contains("absent"),
+        html.contains("<td>absent</td>"),
         "device absent from latest scan renders as absent: {html}"
     );
     assert!(
-        !html.contains("present"),
+        !html.contains("<td>present</td>"),
         "absent device does not render as present: {html}"
     );
 }

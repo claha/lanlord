@@ -4,13 +4,11 @@ use crate::discovery::Discovery;
 use crate::model::{self, Inventory, relative_age};
 use axum::{
     Router,
-    body::Body,
     extract::State,
-    http::header::CONTENT_TYPE,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse},
     routing::get,
 };
-use maud::{Markup, html};
+use maud::{Markup, PreEscaped, html};
 use std::sync::Arc;
 use time::macros::format_description;
 
@@ -33,7 +31,6 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_root))
         .route("/table", get(get_table))
-        .route("/htmx.js", get(get_htmx))
 }
 
 /// Full Inventory page: frames, counts, table, honest empty state.
@@ -48,15 +45,6 @@ async fn get_table(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let now = model::now_epoch_seconds();
     let inventory = inventory(&state.db, now).await;
     Html(render_table(&inventory).into_string())
-}
-
-/// The vendored HTMX library, served from the same host as the page so the
-/// browser never makes a CDN request for it.
-async fn get_htmx() -> Response {
-    Response::builder()
-        .header(CONTENT_TYPE, "application/javascript; charset=utf-8")
-        .body(Body::from(HTMX.to_string()))
-        .expect("vendored HTMX response builds")
 }
 
 async fn inventory(db: &Arc<Db>, now: u64) -> Inventory {
@@ -76,24 +64,18 @@ async fn inventory(db: &Arc<Db>, now: u64) -> Inventory {
 }
 
 fn list_devices(db: &Db, last_scan_start: Option<u64>, now: u64) -> Result<Inventory, db::DbError> {
-    let devices: Vec<model::Device> = db.list_devices()?;
-    let mut new_in_24h = 0usize;
-    let devices = devices
-        .into_iter()
-        .map(|mut device| {
-            device.present = last_scan_start.is_some_and(|start| device.last_seen >= start);
-            if now.saturating_sub(device.first_seen) <= 86_400 {
-                new_in_24h += 1;
-            }
-            device
-        })
-        .collect::<Vec<model::Device>>();
+    let devices = db.list_devices()?;
     let total = devices.len();
-    Ok(Inventory {
+    let mut inventory = Inventory {
         devices,
         total,
-        new_in_24h,
-    })
+        new_in_24h: 0,
+    };
+    // Presence and the new-in-24h count belong on the domain type, not in the
+    // web layer: derive them on the Inventory and keep web.rs thin.
+    inventory.derive_presence(last_scan_start);
+    inventory.new_in_24h = inventory.new_in_24h_count(now);
+    Ok(inventory)
 }
 
 fn render_page(config: &Config, inventory: &Inventory) -> Markup {
@@ -114,7 +96,9 @@ fn render_page(config: &Config, inventory: &Inventory) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "lanlord — Inventory" }
-                script src="/htmx.js" {}
+                // Vendored HTMX, embedded inline so the page makes no external
+                // asset or CDN requests.
+                script { (PreEscaped(&HTMX)) }
                 style { (page_css()) }
             }
             body {
@@ -243,7 +227,7 @@ mod tests {
     use crate::discovery::fake::Scripted;
     use crate::discovery::{Discovery, Observation};
     use crate::model::now_epoch_seconds;
-    use crate::scan::run_scan;
+    use crate::scan::{ScanContext, run_scan};
     use axum::body::to_bytes;
     use http::Request;
     use std::sync::Arc;
@@ -251,7 +235,7 @@ mod tests {
 
     fn observation_with_hostname(mac: &str, ip: &str, hostname: &str) -> Observation {
         Observation {
-            mac: mac.to_string(),
+            mac: model::Mac::new(mac),
             ip: ip.parse().unwrap(),
             hostname: Some(hostname.to_string()),
         }
@@ -277,6 +261,16 @@ mod tests {
         })
     }
 
+    /// Build a `ScanContext` scanning the loopback interface over `db` and
+    /// `discovery`, cloning the shared handles so the caller keeps using them.
+    fn scan_ctx(db: &Arc<Db>, discovery: &Arc<dyn Discovery + Send + Sync>) -> ScanContext {
+        ScanContext {
+            db: db.clone(),
+            discovery: discovery.clone(),
+            interface: "lo".to_string(),
+        }
+    }
+
     async fn render_table(state: Arc<AppState>) -> String {
         let app = router().with_state(state);
         let request = Request::builder()
@@ -295,7 +289,7 @@ mod tests {
         let db = open_temp_db("lanlord.test.web.hostname-present.sqlite");
         let now = model::now_epoch_seconds();
         db.upsert_device(
-            "aa:bb:cc:dd:ee:01",
+            &model::Mac::new("aa:bb:cc:dd:ee:01"),
             "10.0.0.1",
             Some("gateway.home.arpa"),
             now,
@@ -316,7 +310,7 @@ mod tests {
     async fn table_renders_empty_marker_when_hostname_unknown() {
         let db = open_temp_db("lanlord.test.web.hostname-marker.sqlite");
         let now = model::now_epoch_seconds();
-        db.upsert_device("aa:bb:cc:dd:ee:01", "10.0.0.1", None, now)
+        db.upsert_device(&model::Mac::new("aa:bb:cc:dd:ee:01"), "10.0.0.1", None, now)
             .expect("insert succeeds");
         let body = render_table(state_with(db)).await;
         assert!(
@@ -348,7 +342,7 @@ mod tests {
                 "new.home.arpa",
             )],
         ]));
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&scan_ctx(&db, &discovery), now_epoch_seconds())
             .await
             .expect("first scan succeeds");
         let before = render_table(state_with(db.clone())).await;
@@ -358,7 +352,7 @@ mod tests {
         );
         assert!(!before.contains("new.home.arpa"));
 
-        run_scan(&db, &discovery, "lo", now_epoch_seconds())
+        run_scan(&scan_ctx(&db, &discovery), now_epoch_seconds())
             .await
             .expect("repeat scan succeeds");
         let after = render_table(state_with(db)).await;

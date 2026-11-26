@@ -79,16 +79,22 @@ async fn run_and_log(ctx: &ScanContext, now: u64) {
     let result = run_scan(ctx, now).await;
     let duration_ms = start.elapsed().as_millis() as u64;
     match result {
-        Ok(observations) => println!(
-            "event=scan outcome=success duration_ms={} interface={} observations={}",
-            duration_ms,
-            ctx.interface,
-            observations.len()
-        ),
-        Err(error) => println!(
-            "event=scan outcome=failure duration_ms={} interface={} cause={}",
-            duration_ms, ctx.interface, error
-        ),
+        Ok(observations) => {
+            let _ = ctx.db.set_last_scan_outcome("success");
+            println!(
+                "event=scan outcome=success duration_ms={} interface={} observations={}",
+                duration_ms,
+                ctx.interface,
+                observations.len()
+            );
+        }
+        Err(error) => {
+            let _ = ctx.db.set_last_scan_outcome("failure");
+            println!(
+                "event=scan outcome=failure duration_ms={} interface={} cause={}",
+                duration_ms, ctx.interface, error
+            );
+        }
     }
 }
 

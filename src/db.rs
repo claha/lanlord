@@ -147,6 +147,41 @@ impl Db {
                 .expect("meta value is a valid epoch seconds")
         }))
     }
+
+    /// Record the outcome of the most recent Scan ("success" or "failure") in
+    /// the `meta` table, alongside `last_scan_start`. A failed Scan does not
+    /// update `last_scan_start`, but it does record that the last attempt
+    /// failed, so the UI can tell a healthy quiet segment from a broken scan.
+    pub fn set_last_scan_outcome(&self, outcome: &str) -> Result<(), DbError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("database connection mutex is not poisoned");
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_scan_outcome', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [outcome],
+        )
+        .map_err(DbError::Write)?;
+        Ok(())
+    }
+
+    /// Return the outcome of the most recent Scan, if any scan has run.
+    pub fn last_scan_outcome(&self) -> Result<Option<String>, DbError> {
+        let conn = self
+            .conn
+            .lock()
+            .expect("database connection mutex is not poisoned");
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'last_scan_outcome'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DbError::Query)?;
+        Ok(value)
+    }
 }
 
 fn path_display(path: &Path) -> String {
@@ -316,6 +351,31 @@ mod tests {
             db.last_scan_start().expect("read succeeds"),
             Some(1_700_000_100),
             "second write overwrites the first"
+        );
+    }
+
+    #[test]
+    fn last_scan_outcome_is_written_and_read_back() {
+        let db = open_test_db("lanlord.test.db.meta-outcome.sqlite");
+        assert_eq!(
+            db.last_scan_outcome().expect("read succeeds"),
+            None,
+            "no scan outcome is recorded before the first scan"
+        );
+
+        db.set_last_scan_outcome("success").expect("write succeeds");
+        assert_eq!(
+            db.last_scan_outcome().expect("read succeeds"),
+            Some("success".to_string()),
+            "success outcome reads back"
+        );
+
+        db.set_last_scan_outcome("failure")
+            .expect("second write succeeds");
+        assert_eq!(
+            db.last_scan_outcome().expect("read succeeds"),
+            Some("failure".to_string()),
+            "failure outcome overwrites success"
         );
     }
 }

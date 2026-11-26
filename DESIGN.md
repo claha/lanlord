@@ -176,10 +176,16 @@ requests, so the system stacks are the deliberate choice, not a fallback.
   italic 400 in Dim Ink.
 - **Body** (400, 15px, 1.45): empty-state copy and explanations; measure
   capped near 52ch.
+- **Segment label** (500, 12px, 0.03em, mono): the segment line under the
+  wordmark in the masthead.
+- **Clock value** (700, 26px, 1 line-height, mono): the refresh poll interval
+  at top right; the only 26px size on the board.
 - **Label** (500, 11px, 0.12em, uppercase, mono): figure labels, table
   headers, filter keys, flaps, divider labels, clock caption.
 - **Data** (400, 13px, 0.03em, mono, tabular): last-seen age, first-seen age,
   address; MAC at 11px beneath the name.
+- **Empty-state body** (400, 14px, 1.45, sans): body copy in the empty state,
+  one size above the 11px label floor.
 
 ### Named Rules
 
@@ -203,8 +209,8 @@ Address · First seen · State. Address and First seen are right-aligned data
 columns; Device gets the flexible remainder so names never hyphen-wrap
 prematurely. The departed group is separated by a full-width divider row
 rather than a separate page or filter. At ≤720px the figure strip becomes a
-2×2 grid, the Address column collapses into the device cell, First seen is
-hidden, and the state column keeps its place at the right edge.
+2×2 grid with figures at 30px, the Address column collapses into the device
+cell, First seen is hidden, and the state column keeps its place at the right edge.
 
 ## Elevation & Depth
 

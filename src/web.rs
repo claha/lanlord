@@ -122,9 +122,9 @@ async fn get_root(
     Query(query): Query<TableQuery>,
 ) -> impl IntoResponse {
     let now = model::now_epoch_seconds();
-    let (inventory, last_scan_start) = load_page(&state.db, now).await;
+    let (inventory, health) = load_page(&state.db, now, state.config.scan_interval).await;
     let filter = Filter::parse(query.filter.as_deref());
-    Html(render_page(&state.config, &inventory, last_scan_start, filter, now).into_string())
+    Html(render_page(&state.config, &inventory, &health, filter).into_string())
 }
 
 /// Table fragment for HTMX polling: the register plus its empty state, with
@@ -136,18 +136,24 @@ async fn get_table(
     Query(query): Query<TableQuery>,
 ) -> impl IntoResponse {
     let now = model::now_epoch_seconds();
-    let (inventory, last_scan_start) = load_page(&state.db, now).await;
+    let (inventory, health) = load_page(&state.db, now, state.config.scan_interval).await;
     let filter = Filter::parse(query.filter.as_deref());
-    Html(render_table_fragment(&inventory, last_scan_start, filter, now).into_string())
+    Html(render_table_fragment(&inventory, &health, filter).into_string())
 }
 
 /// The Inventory plus the scan start time the page needs to say how fresh it
 /// is. Scan metadata belongs to the page, not to the domain Inventory.
-async fn load_page(db: &Arc<Db>, now: u64) -> (Inventory, Option<u64>) {
+async fn load_page(db: &Arc<Db>, now: u64, scan_interval: u64) -> (Inventory, ScanHealth) {
     let db_for_start = db.clone();
     let last_scan_start =
         match tokio::task::spawn_blocking(move || db_for_start.last_scan_start()).await {
             Ok(Ok(start)) => start,
+            _ => None,
+        };
+    let db_for_outcome = db.clone();
+    let last_scan_outcome =
+        match tokio::task::spawn_blocking(move || db_for_outcome.last_scan_outcome()).await {
+            Ok(Ok(outcome)) => outcome,
             _ => None,
         };
     let db_for_list = db.clone();
@@ -158,7 +164,54 @@ async fn load_page(db: &Arc<Db>, now: u64) -> (Inventory, Option<u64>) {
             Ok(Ok(inventory)) => inventory,
             _ => Inventory::empty(),
         };
-    (inventory, last_scan_start)
+    (
+        inventory,
+        ScanHealth {
+            last_scan_start,
+            last_scan_outcome,
+            scan_interval,
+            now,
+        },
+    )
+}
+
+/// Everything the page needs to say how fresh the scan data is.
+#[derive(Clone, Debug)]
+struct ScanHealth {
+    last_scan_start: Option<u64>,
+    last_scan_outcome: Option<String>,
+    scan_interval: u64,
+    now: u64,
+}
+
+impl ScanHealth {
+    /// True when no scan has run, the last scan failed, or the last scan is
+    /// older than roughly twice the scan interval — meaning the data on the
+    /// board may not reflect the current segment.
+    fn is_unhealthy(&self) -> bool {
+        match self.last_scan_start {
+            None => true,
+            Some(start) => {
+                let age = self.now.saturating_sub(start);
+                self.last_scan_outcome.as_deref() == Some("failure") || age > self.scan_interval * 2
+            }
+        }
+    }
+
+    /// Seconds until the next scan is due, or None if no scan has run yet.
+    fn next_scan_in(&self) -> Option<u64> {
+        match self.last_scan_start {
+            None => None,
+            Some(start) => {
+                let elapsed = self.now.saturating_sub(start);
+                if elapsed >= self.scan_interval {
+                    Some(0)
+                } else {
+                    Some(self.scan_interval - elapsed)
+                }
+            }
+        }
+    }
 }
 
 /// What the masthead calls the scanned range: the configured subnet when the
@@ -188,9 +241,8 @@ fn list_devices(db: &Db, last_scan_start: Option<u64>, now: u64) -> Result<Inven
 fn render_page(
     config: &Config,
     inventory: &Inventory,
-    last_scan_start: Option<u64>,
+    health: &ScanHealth,
     filter: Filter,
-    now: u64,
 ) -> Markup {
     let segment = segment_label(config);
     html! {
@@ -204,6 +256,21 @@ fn render_page(
                 // Vendored HTMX, embedded inline so the page makes no external
                 // asset or CDN requests.
                 script { (PreEscaped(&HTMX)) }
+                // Keyboard accelerators for the filter slices: 1=All, 2=Present,
+                // 3=Departed, 4=Arrivals · 24 h.
+                script {
+                    (PreEscaped(r#"
+document.addEventListener('keydown', (event) => {
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+  const key = event.key;
+  if (key >= '1' && key <= '4') {
+    event.preventDefault();
+    const filters = ['all', 'present', 'departed', 'arrivals'];
+    window.location.href = '/?filter=' + filters[Number(key) - 1];
+  }
+});
+"#))
+                }
                 style { (page_css()) }
             }
             body {
@@ -226,7 +293,7 @@ fn render_page(
                             (filter_link(Filter::Departed, "Departed", filter))
                             (filter_link(Filter::Arrivals, "Arrivals · 24 h", filter))
                         }
-                        (render_polling_table(inventory, last_scan_start, filter, now))
+                        (render_polling_table(inventory, health, filter))
                     }
                     footer .colophon {
                         p {
@@ -330,14 +397,46 @@ fn render_row(device: &model::Device, now: u64) -> Markup {
 /// The register itself, with the departed group cut off by one structural rule
 /// when the full slice is on screen: absence is a place on the page, not only a
 /// filter.
-fn render_register(inventory: &Inventory, filter: Filter, now: u64) -> Markup {
+fn render_register(inventory: &Inventory, health: &ScanHealth, filter: Filter) -> Markup {
     let rows: Vec<&model::Device> = inventory
         .devices
         .iter()
-        .filter(|device| filter.keeps(device, now))
+        .filter(|device| filter.keeps(device, health.now))
         .collect();
     if rows.is_empty() {
-        let (title, body) = filter.empty_copy();
+        let has_scanned = health.last_scan_start.is_some();
+        let (title, body) = if !has_scanned {
+            match filter {
+                Filter::All => (
+                    "No devices yet",
+                    "lanlord hasn't finished its first scan yet. It scans on startup \
+                     and every {} seconds; the first device that replies is recorded \
+                     here and stays in the register.",
+                ),
+                Filter::Present => (
+                    "Nothing present right now",
+                    "No scan has completed yet, so nothing is known to be on the \
+                     segment. The first scan runs on startup and every {} seconds.",
+                ),
+                Filter::Departed => (
+                    "Nothing has departed",
+                    "No scan has completed yet, so nothing is known to have gone \
+                     quiet. The first scan runs on startup and every {} seconds.",
+                ),
+                Filter::Arrivals => (
+                    "No arrivals in 24 hours",
+                    "No scan has completed yet, so no first-time appearances are \
+                     recorded. The first scan runs on startup and every {} seconds.",
+                ),
+            }
+        } else {
+            filter.empty_copy()
+        };
+        let body = if !has_scanned {
+            body.replace("{}", &health.scan_interval.to_string())
+        } else {
+            body.to_string()
+        };
         return html! {
             div .empty {
                 h2 { (title) }
@@ -378,7 +477,7 @@ fn render_register(inventory: &Inventory, filter: Filter, now: u64) -> Markup {
                                 td colspan="5" { "Departed · " (departed_total) }
                             }
                         }
-                        (render_row(device, now))
+                        (render_row(device, health.now))
                     }
                 }
             }
@@ -387,24 +486,34 @@ fn render_register(inventory: &Inventory, filter: Filter, now: u64) -> Markup {
 }
 
 /// How fresh the data is, said plainly, with a sweep that restarts on each
-/// poll so the page shows it is alive without a spinner.
-fn render_status_strip(
-    inventory: &Inventory,
-    last_scan_start: Option<u64>,
-    filter: Filter,
-    now: u64,
-) -> Markup {
+/// poll so the page shows it is alive without a spinner. When the scan is
+/// stale or failed, an amber health warning appears so the operator can tell
+/// a quiet segment from a broken scan.
+fn render_status_strip(inventory: &Inventory, health: &ScanHealth, filter: Filter) -> Markup {
     let shown = inventory
         .devices
         .iter()
-        .filter(|device| filter.keeps(device, now))
+        .filter(|device| filter.keeps(device, health.now))
         .count();
     html! {
         p .strip {
             span .strip-scan {
-                @match last_scan_start {
-                    Some(start) => { "last scan " (scan_age(now.saturating_sub(start))) },
+                @match health.last_scan_start {
+                    Some(start) => { "last scan " (scan_age(health.now.saturating_sub(start))) },
                     None => { "no scan has completed yet" },
+                }
+            }
+            @if health.is_unhealthy() {
+                span .strip-health {
+                    @match health.last_scan_outcome.as_deref() {
+                        Some("failure") => { "scan failed" }
+                        _ => { "stale data" }
+                    }
+                }
+            }
+            @if let Some(seconds) = health.next_scan_in() {
+                span .strip-eta {
+                    "next scan in " (scan_age(seconds))
                 }
             }
             span .strip-count {
@@ -417,34 +526,24 @@ fn render_status_strip(
 
 /// Table fragment for HTMX polling: figures (out of band) plus the region that
 /// replaces itself, so table and empty state always change together.
-fn render_table_fragment(
-    inventory: &Inventory,
-    last_scan_start: Option<u64>,
-    filter: Filter,
-    now: u64,
-) -> Markup {
+fn render_table_fragment(inventory: &Inventory, health: &ScanHealth, filter: Filter) -> Markup {
     html! {
         (render_figures(inventory, true))
-        (render_polling_table(inventory, last_scan_start, filter, now))
+        (render_polling_table(inventory, health, filter))
     }
 }
 
 /// The self-replacing region: HTMX polls `/table` (carrying the current filter)
 /// and swaps this div in place, without ever reloading the document.
-fn render_polling_table(
-    inventory: &Inventory,
-    last_scan_start: Option<u64>,
-    filter: Filter,
-    now: u64,
-) -> Markup {
+fn render_polling_table(inventory: &Inventory, health: &ScanHealth, filter: Filter) -> Markup {
     html! {
         div id="table-region" .region
             hx-get=(format!("/table?filter={}", filter.as_str()))
             hx-trigger=(format!("every {TABLE_POLL_INTERVAL_SECONDS}s"))
             hx-swap="outerHTML"
         {
-            (render_status_strip(inventory, last_scan_start, filter, now))
-            (render_register(inventory, filter, now))
+            (render_status_strip(inventory, health, filter))
+            (render_register(inventory, health, filter))
         }
     }
 }
@@ -498,6 +597,8 @@ fn page_css() -> Markup {
         .strip{position:relative;display:flex;justify-content:space-between;gap:16px;margin:0;\
         padding:9px 0 11px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:11px;\
         letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);overflow:hidden}\
+        .strip-health{color:var(--amber);font-weight:600}\
+        .strip-eta{color:var(--text-dim)}\
         .sweep{position:absolute;left:0;bottom:0;width:100%;height:1px;background:var(--text-dim);opacity:.5;\
         transform-origin:left;animation:sweep 10s linear infinite}\
         @keyframes sweep{from{transform:scaleX(1)}to{transform:scaleX(0)}}\

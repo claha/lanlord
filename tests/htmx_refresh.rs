@@ -93,17 +93,17 @@ async fn get_table_returns_fragment_with_device_rows() {
         "fragment omits the body element: {html}"
     );
 
-    // Device rows: the seeded device shows up in the table.
+    // Device rows: the seeded device shows up in the register.
     assert!(html.contains("<table"), "fragment renders a table: {html}");
     assert!(
         html.contains("aa:bb:cc:dd:ee:ff"),
         "fragment shows the MAC: {html}"
     );
     assert!(html.contains("10.0.0.1"), "fragment shows the IP: {html}");
-    for column in ["MAC", "IP", "First seen", "Last seen"] {
+    for column in ["Last seen", "Device", "Address", "First seen", "State"] {
         assert!(
             html.contains(column),
-            "fragment table has a {column} column: {html}"
+            "fragment register has a {column} column: {html}"
         );
     }
 }
@@ -145,10 +145,11 @@ async fn get_root_references_only_local_assets_and_polls_the_fragment() {
         "viewport meta tag makes the page readable at phone width: {html}"
     );
 
-    // The table swaps itself in place from /table every 10 seconds.
+    // The table swaps itself in place from /table every 10 seconds, carrying
+    // the current filter so a poll never widens the slice the operator chose.
     assert!(
-        html.contains("hx-get=\"/table\""),
-        "table polls the /table fragment: {html}"
+        html.contains("hx-get=\"/table?filter=all\""),
+        "table polls the /table fragment with its filter: {html}"
     );
     assert!(
         html.contains("hx-trigger=\"every 10s\""),

@@ -81,11 +81,11 @@ async fn present_device_renders_as_present() {
     let html = body_of(resp).await;
     assert!(html.contains("aa:bb:cc:dd:ee:01"), "device renders: {html}");
     assert!(
-        html.contains("present"),
+        html.contains("class=\"flap\">Present<"),
         "device seen in latest scan renders as present: {html}"
     );
     assert!(
-        !html.contains("absent"),
+        !html.contains("class=\"flap flap-departed\">Departed<"),
         "device seen in latest scan does not render as absent: {html}"
     );
 }
@@ -113,11 +113,11 @@ async fn absent_device_renders_as_absent() {
         "absent device keeps its row: {html}"
     );
     assert!(
-        html.contains("<td>absent</td>"),
+        html.contains("class=\"flap flap-departed\">Departed<"),
         "device absent from latest scan renders as absent: {html}"
     );
     assert!(
-        !html.contains("<td>present</td>"),
+        !html.contains("class=\"flap\">Present<"),
         "absent device does not render as present: {html}"
     );
 }
@@ -136,7 +136,7 @@ async fn presence_boundary_last_seen_equals_scan_start_is_present() {
     let resp = app.oneshot(req).await.expect("request succeeds");
     let html = body_of(resp).await;
     assert!(
-        html.contains("present"),
+        html.contains("class=\"flap\">Present<"),
         "last_seen == scan start is present: {html}"
     );
 }
@@ -158,7 +158,7 @@ async fn presence_boundary_last_seen_one_second_before_scan_start_is_absent() {
     let resp = app.oneshot(req).await.expect("request succeeds");
     let html = body_of(resp).await;
     assert!(
-        html.contains("absent"),
+        html.contains("class=\"flap flap-departed\">Departed<"),
         "last_seen < scan start is absent: {html}"
     );
 }
@@ -193,11 +193,11 @@ async fn absent_device_keeps_its_row_and_old_last_seen() {
         "absent device keeps its row: {html}"
     );
     assert!(
-        html.contains("present"),
+        html.contains("class=\"flap\">Present<"),
         "present device renders as present: {html}"
     );
     assert!(
-        html.contains("absent"),
+        html.contains("class=\"flap flap-departed\">Departed<"),
         "absent device renders as absent: {html}"
     );
 }
@@ -216,7 +216,7 @@ async fn no_scan_has_run_all_devices_absent() {
     let resp = app.oneshot(req).await.expect("request succeeds");
     let html = body_of(resp).await;
     assert!(
-        html.contains("absent"),
+        html.contains("class=\"flap flap-departed\">Departed<"),
         "device is absent when no scan has run: {html}"
     );
 }
@@ -242,11 +242,11 @@ async fn new_in_24h_counts_devices_with_first_seen_within_24_hours() {
     let html = body_of(resp).await;
 
     assert!(
-        html.contains("New in the last 24 hours: 1"),
+        html.contains("<b>1</b><span>arrivals · 24 h</span>"),
         "exactly one device is new in 24h: {html}"
     );
     assert!(
-        html.contains("Total devices: 2"),
+        html.contains("<b>2</b><span>known</span>"),
         "total count is two: {html}"
     );
 }

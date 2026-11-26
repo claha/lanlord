@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-26T17:30:00Z",
+  "title": "Design System: lanlord",
+  "extensions": {
+    "colorMeta": {
+      "signal-amber": {
+        "role": "primary",
+        "displayName": "Signal Amber",
+        "canonical": "#eda23a",
+        "tonalRamp": ["#2a1700", "#4d2b00", "#744300", "#9a5c00", "#c07a17", "#eda23a", "#f7c46f", "#ffe9c2"]
+      },
+      "enamel-night": {
+        "role": "neutral",
+        "displayName": "Enamel Night",
+        "canonical": "#15161a",
+        "tonalRamp": ["#0b0c0e", "#15161a", "#1f2126", "#2a2c32", "#383b42", "#4a4d55", "#6c7078", "#a9adb4"]
+      },
+      "flap-ivory": {
+        "role": "neutral",
+        "displayName": "Flap Ivory",
+        "canonical": "#e9e5da",
+        "tonalRamp": ["#3a352b", "#5c574b", "#7e796b", "#a19b8c", "#c2bcad", "#d8d2c5", "#e9e5da", "#f8f6f1"]
+      },
+      "ink-night": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#e9e5da",
+        "tonalRamp": ["#221f19", "#3b372e", "#575245", "#736d5e", "#8b8575", "#9c968a", "#c3bdad", "#e9e5da"]
+      },
+      "dim-night": {
+        "role": "neutral",
+        "displayName": "Dim Ink",
+        "canonical": "#9c968a",
+        "tonalRamp": ["#221f19", "#3b372e", "#575245", "#736d5e", "#8b8575", "#9c968a", "#c3bdad", "#e9e5da"]
+      },
+      "rule-strong-night": {
+        "role": "neutral",
+        "displayName": "Strong Rule",
+        "canonical": "#4d5057",
+        "tonalRamp": ["#1b1c1f", "#2a2c31", "#3a3d43", "#4d5057", "#62656d", "#7e828a", "#a3a7ae", "#cbd0d6"]
+      }
+    },
+    "typographyMeta": {
+      "figures": { "displayName": "Board Figures", "purpose": "The four segment counts; tabular numerals, never jittering." },
+      "wordmark": { "displayName": "Tracked Wordmark", "purpose": "LANLORD only, wide caps tracking." },
+      "device": { "displayName": "Device Name", "purpose": "Sentence-case hostname as recorded." },
+      "body": { "displayName": "Body", "purpose": "Empty-state and explanatory copy, capped near 52ch." },
+      "label": { "displayName": "Structural Label", "purpose": "11px mono caps for headers, keys, flaps, figures and captions." },
+      "data": { "displayName": "Tabular Data", "purpose": "Ages, addresses and MACs in tabular mono." }
+    },
+    "shadows": [
+      { "name": "board-edge-night", "value": "inset 0 0 0 1px #2a2c31", "purpose": "The panel's thickness on the night ground." },
+      { "name": "board-edge-day", "value": "inset 0 0 0 1px #dde1e4", "purpose": "The panel's thickness in daylight." }
+    ],
+    "motion": [
+      { "name": "poll-sweep", "value": "10s linear infinite", "purpose": "One 1px cadence mark under the scan strip per poll interval." },
+      { "name": "reduced-motion", "value": "none", "purpose": "The sweep stops entirely under prefers-reduced-motion." }
+    ],
+    "breakpoints": [
+      { "name": "phone", "value": "720px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Filter Key Row",
+      "kind": "nav",
+      "refersTo": "filter-key",
+      "description": "Server-rendered slice links; the current slice inverts into a flap cell.",
+      "html": "<div class=\"ds-keys\"><a class=\"ds-key is-current\" href=\"#\" aria-current=\"page\">ALL</a><a class=\"ds-key\" href=\"#\">PRESENT</a><a class=\"ds-key\" href=\"#\">DEPARTED</a><a class=\"ds-key\" href=\"#\">ARRIVALS · 24 H</a></div>",
+      "css": ".ds-keys{display:flex;flex-wrap:wrap;width:max-content;max-width:100%;border:1px solid #4d5057;background:#15161a;color:#e9e5da;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace}.ds-key{padding:7px 16px;border-right:1px solid #33353b;color:#e9e5da;text-decoration:none;font-size:11px;letter-spacing:.12em;text-transform:uppercase}.ds-key:last-child{border-right:0}.ds-key:hover{background:rgba(255,255,255,.035)}.ds-key.is-current{background:#e9e5da;color:#15161a}.ds-key:focus-visible{outline:2px solid #eda23a;outline-offset:-2px}"
+    },
+    {
+      "name": "Figure Strip",
+      "kind": "card",
+      "refersTo": "board-shell",
+      "description": "Four inline counts divided by hairlines; the arrival count is the only amber pair.",
+      "html": "<section class=\"ds-figures\"><div class=\"ds-figure\"><b>15</b><span>known</span></div><div class=\"ds-figure\"><b>11</b><span>present</span></div><div class=\"ds-figure\"><b>4</b><span>departed</span></div><div class=\"ds-figure ds-figure-arrival\"><b>1</b><span>arrivals · 24 h</span></div></section>",
+      "css": ".ds-figures{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid #33353b;background:#15161a;color:#e9e5da}.ds-figure{padding:20px 0 16px;border-right:1px solid #33353b;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}.ds-figure:last-child{border-right:0}.ds-figure b{display:block;font-size:40px;font-weight:700;line-height:.9;letter-spacing:-.02em;font-variant-numeric:tabular-nums}.ds-figure span{display:block;margin-top:10px;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#9c968a}.ds-figure-arrival b,.ds-figure-arrival span{color:#eda23a}"
+    },
+    {
+      "name": "State Flap",
+      "kind": "chip",
+      "refersTo": "state-flap",
+      "description": "Presence as a split-flap cell; departure as an outlined, unfilled cell.",
+      "html": "<span class=\"ds-flap\">Present</span> <span class=\"ds-flap ds-flap-departed\">Departed</span>",
+      "css": ".ds-flap{display:inline-block;padding:4px 10px;background-color:#e9e5da;color:#15161a;background-image:linear-gradient(transparent 48%,rgba(0,0,0,.28) 48%,rgba(0,0,0,.28) 52%,transparent 52%);font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:11px;letter-spacing:.12em;text-transform:uppercase}.ds-flap-departed{background-color:transparent;background-image:none;color:#9c968a;border:1px solid #4d5057}"
+    },
+    {
+      "name": "Register Row",
+      "kind": "custom",
+      "refersTo": "register-row",
+      "description": "Time-led table row: age, device with MAC, address, first seen, state flap.",
+      "html": "<table class=\"ds-register\"><thead><tr><th>Last seen</th><th>Device</th><th>Address</th><th>First seen</th><th>State</th></tr></thead><tbody><tr class=\"ds-row\"><td class=\"ds-time\">NOW</td><td class=\"ds-device\"><span class=\"ds-name\">nas.lan</span><span class=\"ds-mac\">00:11:32:6f:2b:d4</span></td><td class=\"ds-addr\">192.168.1.40</td><td class=\"ds-first\">500 D</td><td class=\"ds-state\"><span class=\"ds-flap\">Present</span></td></tr></tbody></table>",
+      "css": ".ds-register{width:100%;border-collapse:collapse;background:#15161a;color:#e9e5da;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-variant-numeric:tabular-nums}.ds-register th{padding:14px 0 9px;border-bottom:1px solid #4d5057;text-align:left;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:11px;font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:#9c968a;white-space:nowrap}.ds-register td{padding:13px 0;border-bottom:1px solid #33353b;vertical-align:baseline;white-space:nowrap}.ds-register th+th,.ds-register td+td{padding-left:18px}.ds-register .ds-time{width:96px;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:13px;letter-spacing:.03em}.ds-register .ds-device{width:auto;min-width:240px;white-space:normal}.ds-register .ds-addr,.ds-register .ds-first{text-align:right;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:12.5px;color:#9c968a}.ds-register .ds-state{text-align:right}.ds-name{font-size:15px;font-weight:600}.ds-mac{display:block;margin-top:3px;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:11px;letter-spacing:.04em;color:#9c968a}.ds-row:hover td{background:rgba(255,255,255,.035)}"
+    },
+    {
+      "name": "Arrival Flag",
+      "kind": "chip",
+      "refersTo": "arrival-flag",
+      "description": "One-pixel amber tag inline after the name of a device first seen in the last 24 hours.",
+      "html": "<span class=\"ds-arrival\">arrival</span>",
+      "css": ".ds-arrival{display:inline-block;margin-left:8px;padding:1px 6px;border:1px solid #eda23a;color:#eda23a;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;font-size:11px;letter-spacing:.1em;text-transform:uppercase;vertical-align:1px}"
+    },
+    {
+      "name": "Refresh Clock",
+      "kind": "custom",
+      "refersTo": "board-shell",
+      "description": "The amber poll interval and its caption, with the 1px cadence sweep beneath the scan strip.",
+      "html": "<div class=\"ds-clock\"><span class=\"ds-clock-value\">10 s</span><span class=\"ds-clock-label\">between refreshes</span></div><div class=\"ds-sweep-track\"><span class=\"ds-sweep\"></span></div>",
+      "css": ".ds-clock{text-align:right;font-family:ui-monospace,'SF Mono',Menlo,'Cascadia Mono','DejaVu Sans Mono',monospace;color:#eda23a;background:#15161a}.ds-clock-value{display:block;font-size:26px;line-height:1}.ds-clock-label{display:block;margin-top:4px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#9c968a}.ds-sweep-track{position:relative;height:1px;background:#33353b;margin-top:10px}.ds-sweep{position:absolute;inset:0;background:#9c968a;opacity:.5;transform-origin:left;animation:ds-sweep 10s linear infinite}@keyframes ds-sweep{from{transform:scaleX(1)}to{transform:scaleX(0)}}@media (prefers-reduced-motion:reduce){.ds-sweep{animation:none;opacity:.35}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Segment Departure Board",
+    "overview": "lanlord is a split-flap departures board for one LAN segment. The page is an enamel panel, near-black at night and cool pale enamel in daylight, ruled by hairlines and carrying exactly one signal colour. The register is a timetable: each row opens with when the device was last seen, names the device in sentence case, and closes with a state flap. Nothing is rounded, nothing floats, and nothing is decorated that is not a fact from the last scan.\n\nThe system is built for the operator's brief visit, so hierarchy is temporal before it is alphabetical. Present devices stack at NOW, departures keep their place below a structural rule, and the stopwatch at top right states how often the board refreshes. A device that arrived in the last 24 hours carries a 1px amber arrival flag; that and the refresh clock are the only places amber is allowed. The result should feel like infrastructure that was installed, not a dashboard that was assembled.",
+    "keyCharacteristics": [
+      "Enamel ground, ivory flap cells, one amber signal.",
+      "Zero radii; 1px rules do all the separating.",
+      "Last-seen time leads every row; state closes it.",
+      "Split-flap cells for presence, never coloured dots.",
+      "Identical light and dark boards, chosen by the system appearance."
+    ],
+    "rules": [
+      { "name": "The Two-Use Amber Rule", "body": "Amber belongs to the refresh clock and the arrival signal. Focus outlines may borrow it as an accessibility state; nothing else may. Its rarity is how the operator finds \"new\" in one pass.", "section": "colors" },
+      { "name": "The Enamel-Not-Cream Rule", "body": "Daylight ground is cool pale enamel (#eceef0), never warm beige. Warmth lives in the flap cells, not the field.", "section": "colors" },
+      { "name": "The Sentence-Case Data Rule", "body": "Device names are data and stay in sentence case. Uppercase is a structural voice for labels, figures, flaps and the wordmark only.", "section": "typography" },
+      { "name": "The Terse Age Rule", "body": "Last seen reads NOW, 10 M, 2 H, 21 D. A present device never reads \"0 minutes ago\".", "section": "typography" }
+    ],
+    "dos": [
+      "Do lead every register row with its last-seen age and close it with a state flap.",
+      "Do keep the departed group on the page under a structural divider; an empty slice explains itself and links back to the full register.",
+      "Do keep amber to the refresh clock and arrival signal; use focus amber only for keyboard state.",
+      "Do use tabular numerals for every time, count and address.",
+      "Do hold the 11px floor for functional labels and the 4.5:1 contrast floor in both appearances.",
+      "Do treat daylight as an equal board: cool enamel ground, inverted flap cells, same amber signal."
+    ],
+    "donts": [
+      "Don't round corners, add shadows, or float panels on the board.",
+      "Don't use cards, coloured status dots, or a separate \"departed\" page.",
+      "Don't uppercase device names; they are data, not labels.",
+      "Don't render a zero-duration age as \"0 minutes ago\"; use NOW.",
+      "Don't add a kicker or eyebrow above a heading, or any ornamental label that does not state a scan fact.",
+      "Don't load external fonts, icons or CDN assets; HTMX is vendored and the type is on the machine."
+    ]
+  }
+}

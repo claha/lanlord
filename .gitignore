@@ -4,3 +4,7 @@
 *.db
 *.db-shm
 *.db-wal
+/.impeccable/config.local.json
+
+/.opencode/
+/.impeccable/reference/

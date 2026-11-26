@@ -67,28 +67,28 @@ async fn get_root_renders_empty_inventory_page() {
 
     assert!(html.contains("lanlord"), "page is branded: {html}");
     assert!(
-        html.contains("Total devices: 0"),
-        "total count is zero: {html}"
+        html.contains("<b>0</b><span>known</span>"),
+        "known-device figure is zero: {html}"
     );
     assert!(
-        html.contains("New in the last 24 hours: 0"),
-        "new-in-24-hours count is zero: {html}"
+        html.contains("<b>0</b><span>present</span>"),
+        "present figure is zero: {html}"
     );
     assert!(
-        html.contains("No devices have been discovered yet"),
+        html.contains("<b>0</b><span>arrivals · 24 h</span>"),
+        "arrivals figure is zero: {html}"
+    );
+    assert!(
+        html.contains("No devices yet"),
         "distinct empty state before the first scan: {html}"
     );
     assert!(
-        html.contains("waiting for its first Scan"),
-        "empty state explains why it is empty: {html}"
+        html.contains("first device that replies is recorded here"),
+        "empty state explains how the register fills: {html}"
     );
-    for column in ["MAC", "IP", "First seen", "Last seen"] {
-        assert!(html.contains(column), "table has a {column} column: {html}");
-    }
-    assert!(html.contains("<table"), "page renders a table");
     assert!(
-        html.contains("<tbody></tbody>"),
-        "table body is empty when no devices exist: {html}"
+        !html.contains("<table"),
+        "no empty table skeleton is drawn: {html}"
     );
 
     // HTMX is vendored and embedded: no external asset or CDN requests.
@@ -133,15 +133,20 @@ async fn get_table_renders_table_fragment_only() {
         !html.contains("<body"),
         "fragment omits the body element: {html}"
     );
-    assert!(html.contains("<table"), "fragment renders a table: {html}");
     assert!(
-        html.contains("<tbody></tbody>"),
-        "fragment table body is empty: {html}"
+        html.contains("id=\"table-region\""),
+        "fragment renders the swappable region: {html}"
     );
-    for column in ["MAC", "IP", "First seen", "Last seen"] {
-        assert!(
-            html.contains(column),
-            "fragment table has a {column} column: {html}"
-        );
-    }
+    assert!(
+        html.contains("hx-get=\"/table?filter=all\""),
+        "the region carries its own polling URL and filter: {html}"
+    );
+    assert!(
+        html.contains("No devices yet"),
+        "fragment carries the empty state: {html}"
+    );
+    assert!(
+        html.contains("hx-swap-oob=\"outerHTML\""),
+        "figures ride along out of band: {html}"
+    );
 }

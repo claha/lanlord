@@ -505,7 +505,10 @@ mod tests {
             discovery: Arc::new(Scripted::new(Vec::new())),
         });
         let body = render_body(state, "/").await;
-        assert!(body.contains("Total devices: 2"));
+        assert!(
+            body.contains("<b>2</b><span>known</span>"),
+            "the known-device figure shows the total: {body}"
+        );
         let b_position = body.find("aa:bb:cc:dd:ee:02").expect("B renders");
         let a_position = body.find("aa:bb:cc:dd:ee:01").expect("A renders");
         assert!(b_position < a_position, "newest last seen sorts first");
@@ -542,9 +545,12 @@ mod tests {
             discovery: Arc::new(Scripted::new(Vec::new())),
         });
         let body = render_body(state, "/").await;
-        assert!(body.contains("Total devices: 0"));
         assert!(
-            body.contains("No devices have been discovered yet"),
+            body.contains("<b>0</b><span>known</span>"),
+            "the known-device figure reads zero: {body}"
+        );
+        assert!(
+            body.contains("No devices yet"),
             "renders the honest empty state"
         );
     }
